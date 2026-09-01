@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# World saves (optional: comment out if you want to track world state)
+chunks/*.wrld
+chunks/*.json
+
+# OS
+.DS_Store
+Thumbs.db

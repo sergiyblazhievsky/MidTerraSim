@@ -1,0 +1,27 @@
+{
+  "cycle_length": 300.0,
+  "season_length": 10,
+  "day_night_cycle": 60.0,
+  "seasons": {
+    "spring": {
+      "moisture": 40,
+      "fertility": 20,
+      "texture": "grass.png"
+    },
+    "summer": {
+      "moisture": 20,
+      "fertility": 30,
+      "texture": "grass.png"
+    },
+    "fall": {
+      "moisture": 30,
+      "fertility": 40,
+      "texture": "grass_fall.png"
+    },
+    "winter": {
+      "moisture": 30,
+      "fertility": 10,
+      "texture": "grass_winter.png"
+    }
+  }
+}
