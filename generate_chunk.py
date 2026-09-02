@@ -234,6 +234,27 @@ for py in range(4, 13):
 rat_img.save("textures/rat.png")
 print("Saved textures/rat.png")
 
+# seed — small tan/brown oval drop icon on transparent background, 16x16
+seed_img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+for py in range(16):
+    for px in range(16):
+        # oval mask centered at (8, 8), radius x=4, y=6
+        dx = (px - 8) / 4.0
+        dy = (py - 8) / 6.0
+        if dx * dx + dy * dy <= 1.0:
+            shade = random.randint(-15, 15)
+            seed_img.putpixel((px, py), (
+                max(0, min(255, 195 + shade)),
+                max(0, min(255, 160 + shade)),
+                max(0, min(255, 90 + shade)),
+                255,
+            ))
+# small darker highlight line down the middle
+for py in range(4, 12):
+    seed_img.putpixel((8, py), (140, 105, 55, 255))
+seed_img.save("textures/seed.png")
+print("Saved textures/seed.png")
+
 # ── world ─────────────────────────────────────────────────────────────────────
 os.makedirs("chunks", exist_ok=True)
 chunk = Chunk(size=(100, 100, 100))
@@ -293,10 +314,6 @@ def place_flower_if_possible(x, z):
     base_y = surface_y - 1
     if chunk.get_block(x, base_y, z) == AIR:
         return False
-    if _count_kind(x, z, TREE, 1) > 0:
-        return False
-    if _count_kind(x, z, BUSH, 1) > 0:
-        return False
     if _count_kind(x, z, FLOWER, 1) >= 2:
         return False
     chunk.set_block(x, surface_y, z, FLOWER)
@@ -314,7 +331,7 @@ for x in range(sx):
             continue
         if random.random() < 0.030 and place_bush_if_possible(x, z):
             continue
-        if random.random() < 0.070 and place_flower_if_possible(x, z):
+        if random.random() < 0.090 and place_flower_if_possible(x, z):
             continue
 
 chunk.save("chunks/chunk_0_0.wrld")

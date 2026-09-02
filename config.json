@@ -2,6 +2,7 @@
   "cycle_length": 300.0,
   "season_length": 10,
   "day_night_cycle": 60.0,
+  "drop_lifetime": 60.0,
   "seasons": {
     "spring": {
       "moisture": 40,
