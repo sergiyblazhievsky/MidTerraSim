@@ -11,6 +11,8 @@ import pytest
 import server as server_module
 from chunk import BUSH, FLOWER, GRASS, TREE
 
+from tests.conftest import isolate_creature
+
 
 # ── config loading ───────────────────────────────────────────────────────────
 
@@ -227,6 +229,7 @@ def test_update_drops_expires_after_lifetime(world):
 
 def test_update_drops_picked_up_by_adjacent_hungry_creature(world):
     ci = 0
+    isolate_creature(world, ci, 0)
     world.all_creature_positions[ci][0] = (0, 0)
     world.all_creature_stats[ci][0]["hunger"] = 0
     world.all_creature_stats[ci][0]["asleep"] = False
@@ -240,6 +243,7 @@ def test_update_drops_picked_up_by_adjacent_hungry_creature(world):
 
 def test_update_drops_not_picked_up_by_sleeping_creature(world):
     ci = 0
+    isolate_creature(world, ci, 0)
     world.all_creature_positions[ci][0] = (0, 0)
     world.all_creature_stats[ci][0]["hunger"] = 0
     world.all_creature_stats[ci][0]["asleep"] = True
@@ -252,6 +256,7 @@ def test_update_drops_not_picked_up_by_sleeping_creature(world):
 
 
 def test_update_drops_ignored_for_non_matching_diet(world):
+    isolate_creature(world, 0, 0)
     world.all_creature_positions[0][0] = (0, 0)
     world.all_creature_stats[0][0]["hunger"] = 0
     world._spawn_drop("log", 1, 0, 0)  # "log" is not in the rat's "food" diet
@@ -965,6 +970,7 @@ def test_snapshot_vegetation_only_lists_known_flora_blocks_with_their_age(world)
     entries = [v for v in snap["vegetation"] if (v["x"], v["z"]) == (1, 1)]
     assert len(entries) == 1
     assert entries[0]["block_id"] == FLOWER
+    assert entries[0]["type"] == "flower"
     assert entries[0]["age"] == 2
 
 
@@ -972,8 +978,20 @@ def test_snapshot_creatures_have_stable_ids_and_expected_fields(world):
     snap = world.snapshot()
     assert len(snap["creatures"]) == len(world.all_creature_positions[0])
     c = snap["creatures"][0]
-    assert set(c.keys()) == {"id", "type", "x", "z", "age", "hunger", "sleep", "asleep"}
+    assert set(c.keys()) == {"id", "type", "x", "z", "age", "hunger", "sleep", "asleep", "needs"}
     assert c["type"] == "rat"
+
+
+def test_snapshot_creatures_include_computed_needs(world):
+    ci = 0
+    world.all_creature_stats[ci][0]["hunger"] = 1
+    world.all_creature_stats[ci][0]["sleep"] = 0.5
+    world.all_creature_stats[ci][0]["asleep"] = False
+
+    snap = world.snapshot()
+
+    c = next(c for c in snap["creatures"] if c["id"] == world.all_creature_stats[ci][0]["id"])
+    assert c["needs"] == {"feed": 2, "sleep": 0.5}  # initial_hunger(3) - hunger(1)
 
 
 def test_snapshot_drops_include_a_computed_age_in_seconds(world):

@@ -216,3 +216,20 @@ def isolated_paths(tmp_path, monkeypatch):
 def world(isolated_paths):
     """A freshly constructed World over the isolated fixture files."""
     return server_module.World()
+
+
+def isolate_creature(world, ci, i):
+    """Put every OTHER seeded creature of type `ci` to sleep so it can never
+    interact (pickup/attack/etc.) regardless of its randomly-seeded position.
+
+    `World._seed_creatures()` places creatures at genuinely random positions
+    (subject only to a `min_spawn_distance` spacing hint), so a test that
+    configures a single creature's position/state but leaves sibling
+    instances untouched can flake if one of them happens to land adjacent to
+    whatever the test is probing. Call this before exercising interaction
+    logic (e.g. `_update_drops`) to make the "one relevant creature" scenario
+    deterministic irrespective of that seeding randomness.
+    """
+    for other_i, st in enumerate(world.all_creature_stats[ci]):
+        if other_i != i:
+            st["asleep"] = True

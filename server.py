@@ -737,7 +737,11 @@ class World:
     def snapshot(self):
         now = time.time()
         vegetation = [
-            {'x': x, 'z': z, 'block_id': bid, 'age': self.chunk.vegetation_ages.get((x, z))}
+            {
+                'x': x, 'z': z, 'block_id': bid,
+                'type': self.veg_defs[bid]['name'],
+                'age': self.chunk.vegetation_ages.get((x, z)),
+            }
             for (x, z), bid in self.chunk.overrides_at_y(self.SY).items()
             if bid in self.veg_defs
         ]
@@ -753,6 +757,7 @@ class World:
                     'hunger': st['hunger'],
                     'sleep': st.get('sleep', 0.0),
                     'asleep': st.get('asleep', False),
+                    'needs': self._compute_creature_needs(cdef, st),
                 })
 
         drops = [
@@ -788,6 +793,164 @@ class World:
 
 
 # ── HTTP API ────────────────────────────────────────────────────────────────
+
+# A self-contained, dependency-free HTML/JS debug page: polls GET /state and
+# renders a collapsible tree of vegetation/creatures/drops, grouped by type,
+# with per-creature stats and computed needs. No build step, no external
+# assets/CDNs -- works entirely offline, same as the rest of the server.
+INSPECTOR_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MidTerraSim -- Server Inspector</title>
+<style>
+  body { background:#111418; color:#ddd; font-family: Consolas, Menlo, monospace; font-size: 14px; margin:0; padding: 18px; }
+  h1 { font-size: 16px; margin: 0 0 6px 0; color:#8ecbff; }
+  #status { color:#8fbf8f; margin-bottom: 14px; font-size: 12px; }
+  #status.stale { color:#e77676; }
+  details { margin-left: 18px; }
+  details > summary { cursor: pointer; padding: 2px 0; list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before { content: "\\25b8  "; color:#777; }
+  details[open] > summary::before { content: "\\25be  "; }
+  summary:hover { color:#fff; }
+  .leaf { margin-left: 34px; padding: 1px 0; color:#bbb; }
+  .kv { color:#9fd9a8; }
+  .count { color:#888; font-weight: normal; }
+  .section > summary { color:#ffd479; font-weight: bold; }
+  #tree { margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>MidTerraSim &mdash; Server Inspector</h1>
+  <div id="status">connecting&hellip;</div>
+  <div id="tree"></div>
+<script>
+  // Track which <details> nodes are open (by stable key) across re-renders,
+  // so polling doesn't collapse whatever the user has expanded. The native
+  // "toggle" event doesn't bubble, but it does propagate in the capturing
+  // phase, so a single document-level capturing listener catches every one.
+  const openKeys = new Set();
+  document.addEventListener('toggle', (e) => {
+    if (e.target.tagName !== 'DETAILS') return;
+    const key = e.target.dataset.key;
+    if (!key) return;
+    if (e.target.open) openKeys.add(key); else openKeys.delete(key);
+  }, true);
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function details(key, label, count, innerHtml, extraClass) {
+    const isOpen = openKeys.has(key) ? ' open' : '';
+    const cls = extraClass ? ` class="${extraClass}"` : '';
+    const countHtml = (count === undefined) ? '' : ` <span class="count">(${count})</span>`;
+    return `<details data-key="${esc(key)}"${isOpen}${cls}><summary>${esc(label)}${countHtml}</summary>${innerHtml}</details>`;
+  }
+
+  function leaf(html) {
+    return `<div class="leaf">${html}</div>`;
+  }
+
+  function groupBy(list, keyFn) {
+    const groups = {};
+    for (const item of list) {
+      const k = keyFn(item);
+      (groups[k] = groups[k] || []).push(item);
+    }
+    return groups;
+  }
+
+  function renderVegetation(state) {
+    const groups = groupBy(state.vegetation, v => v.type);
+    let html = '';
+    for (const name of Object.keys(groups).sort()) {
+      const items = groups[name];
+      let inner = '';
+      for (const v of items) {
+        const age = (v.age === null || v.age === undefined) ? 'n/a' : v.age;
+        inner += leaf(`${esc(name)} @ (${v.x}, ${v.z}) &mdash; <span class="kv">age</span>: ${age}`);
+      }
+      html += details(`veg:${name}`, name, items.length, inner);
+    }
+    return details('veg', 'Vegetation', state.vegetation.length, html, 'section');
+  }
+
+  function renderNeeds(parentKey, needs) {
+    const entries = Object.entries(needs || {});
+    let inner = '';
+    for (const [k, v] of entries) {
+      inner += leaf(`<span class="kv">${esc(k)}</span>: ${v}`);
+    }
+    return details(`${parentKey}:needs`, 'needs', entries.length, inner);
+  }
+
+  function renderCreatures(state) {
+    const groups = groupBy(state.creatures, c => c.type);
+    let html = '';
+    for (const name of Object.keys(groups).sort()) {
+      const items = groups[name].slice().sort((a, b) => a.id - b.id);
+      let inner = '';
+      for (const c of items) {
+        const ikey = `creature:${name}:${c.id}`;
+        let cinner = '';
+        cinner += leaf(`<span class="kv">position</span>: (${c.x}, ${c.z})`);
+        cinner += leaf(`<span class="kv">age</span>: ${c.age}`);
+        cinner += leaf(`<span class="kv">hunger</span>: ${c.hunger}`);
+        cinner += leaf(`<span class="kv">sleep</span>: ${c.sleep}`);
+        cinner += leaf(`<span class="kv">asleep</span>: ${c.asleep}`);
+        cinner += renderNeeds(ikey, c.needs);
+        inner += details(ikey, `${name} #${c.id}`, undefined, cinner);
+      }
+      html += details(`creature:${name}`, name, items.length, inner);
+    }
+    return details('creatures', 'Creatures', state.creatures.length, html, 'section');
+  }
+
+  function renderDrops(state) {
+    const groups = groupBy(state.drops, d => d.item);
+    let html = '';
+    for (const name of Object.keys(groups).sort()) {
+      const items = groups[name];
+      let inner = '';
+      for (const d of items) {
+        inner += leaf(`${esc(name)} x${d.count} @ (${d.x}, ${d.z}) &mdash; <span class="kv">age</span>: ${d.age.toFixed(1)}s`);
+      }
+      html += details(`drop:${name}`, name, items.length, inner);
+    }
+    return details('drops', 'Drops', state.drops.length, html, 'section');
+  }
+
+  async function poll() {
+    const statusEl = document.getElementById('status');
+    try {
+      const resp = await fetch('/state', { cache: 'no-store' });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const state = await resp.json();
+
+      document.getElementById('tree').innerHTML =
+        renderVegetation(state) + renderCreatures(state) + renderDrops(state);
+
+      const t = state.time;
+      statusEl.textContent =
+        `${t.season} | cycle ${t.cycle} | day ${t.day} | ${t.is_day ? 'day' : 'night'} | ` +
+        `revision ${state.revision} | updated ${new Date().toLocaleTimeString()}`;
+      statusEl.classList.remove('stale');
+    } catch (err) {
+      statusEl.textContent = 'disconnected -- retrying\\u2026';
+      statusEl.classList.add('stale');
+    }
+  }
+
+  poll();
+  setInterval(poll, 1000);
+</script>
+</body>
+</html>
+"""
+
+
 def make_handler(world):
     class Handler(BaseHTTPRequestHandler):
         server_version = 'MidTerraSim/1.0'
@@ -800,9 +963,19 @@ def make_handler(world):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_html(self, html, status=200):
+            body = html.encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
             path = urlparse(self.path).path
-            if path == '/health':
+            if path == '/':
+                self._send_html(INSPECTOR_HTML)
+            elif path == '/health':
                 with world.lock:
                     rev = world.revision
                 self._send_json({'status': 'ok', 'revision': rev})

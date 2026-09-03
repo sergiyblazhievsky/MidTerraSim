@@ -164,14 +164,15 @@ def build_ground_mesh(sx, sz, sy):
 
 
 def build_veg_mesh(entries, sy):
-    """Cross-quad mesh for a list of {'x','z','height'} vegetation entries
-    that all share one (block_id, stage) — one Entity per such group."""
+    """Cross-quad mesh for a list of {'x','z','height','width'} vegetation
+    entries that all share one (block_id, stage) — one Entity per such group."""
     verts, tris, uvs = [], [], []
     for e in entries:
         x, z, h = e['x'], e['z'], e['height']
+        half_w = e.get('width', 1.0) / 2.0
         for (dx0, dz0), (dx1, dz1) in [
-            ((-0.5, -0.5), (+0.5, +0.5)),
-            ((+0.5, -0.5), (-0.5, +0.5)),
+            ((-half_w, -half_w), (+half_w, +half_w)),
+            ((+half_w, -half_w), (-half_w, +half_w)),
         ]:
             base = len(verts)
             verts += [
@@ -322,7 +323,11 @@ def _rebuild_vegetation(vegetation_list):
         age = v['age'] if v['age'] is not None else vdef['initial_age']
         stage = _get_stage(vdef, age)
         si = vdef['stages'].index(stage)
-        groups.setdefault((bid, si), []).append({'x': v['x'], 'z': v['z'], 'height': stage['height']})
+        groups.setdefault((bid, si), []).append({
+            'x': v['x'], 'z': v['z'],
+            'height': stage['height'],
+            'width': stage.get('width', 1.0),
+        })
 
     for key, ent in veg_entities.items():
         ent.model = build_veg_mesh(groups.get(key, []), SY)

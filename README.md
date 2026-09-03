@@ -85,7 +85,7 @@ What's covered:
 - Daily/seasonal lifecycle (hunger/age decay, winter aging, summer reproduction, removal)
 - The flora simulation cycle (`_sim_step`): decay, season rotation, and tag-driven spawn-blocking rules
 - `tick()` scheduling: day/night transitions, revision counting, periodic save/sim-step triggers, creature movement/sleep timing
-- The full HTTP/JSON API (`/health`, `/state`, `/save`, unknown routes, unsupported methods, concurrent requests) against a real `ThreadingHTTPServer`
+- The full HTTP/JSON API (`/health`, `/state`, `/save`, unknown routes, unsupported methods, concurrent requests, and the `/` inspector page) against a real `ThreadingHTTPServer`
 
 ## HTTP API (`server.py`)
 
@@ -94,9 +94,32 @@ What's covered:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/` | GET | Human-facing HTML debug page — a collapsible tree of vegetation/creatures/drops (see below) |
 | `/health` | GET | `{"status": "ok", "revision": <int>}` — cheap liveness/poll check |
 | `/state`  | GET | Full renderable world snapshot (terrain/time, vegetation, creatures, drops) |
 | `/save`   | POST | Force an immediate save to `chunks/chunk_0_0.wrld` |
+
+Open `http://127.0.0.1:8765/` (or your configured host/port) in any browser
+for a live, self-contained inspector page — no build step, no external
+assets. It polls `/state` once per second and renders everything as a
+collapsible tree, grouped by type, with each creature broken out to show its
+raw stats and the server's currently-computed `needs`:
+
+```
+▾ Vegetation (1140)
+    ▸ bush (474)
+    ▸ flower (454)
+    ▸ tree (212)
+▾ Creatures (5)
+  ▾ rat (5)
+      ▾ rat #1
+          position: (13, 88)  age: 2  hunger: 3  sleep: 0  asleep: false
+        ▾ needs
+            feed: 0
+            sleep: 0
+      ▸ rat #2 ... #5
+▸ Drops (0)
+```
 
 All snapshot reads and mutations are guarded by a single lock, so concurrent
 client requests never race with the simulation tick — `main.py` is just one

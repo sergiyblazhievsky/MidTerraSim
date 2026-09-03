@@ -76,6 +76,7 @@ three routes below are fixed.
 
 | Endpoint | Method | Success | Description |
 |----------|--------|---------|--------------|
+| `/` | GET | `200` | Human-facing HTML debug page — a self-contained, dependency-free tree view of the world (see §4a). Not part of the JSON API contract. |
 | `/health` | GET | `200` | Cheap liveness/poll check |
 | `/state`  | GET | `200` | Full renderable world snapshot |
 | `/save`   | POST | `200` | Force an immediate save to disk |
@@ -96,6 +97,43 @@ Every JSON response includes:
 - `Content-Length: <n>`
 - Standard `BaseHTTPRequestHandler` headers: `Server: MidTerraSim/1.0
   Python/<version>` and `Date: <RFC 1123 timestamp>`.
+
+### 4a. `GET /` — the HTML inspector page
+
+Returns a self-contained HTML+CSS+JS page (no external assets, no CDN
+dependencies, works fully offline) that polls `GET /state` client-side once
+per second and renders a collapsible tree:
+
+```
+▾ Vegetation (1140)
+    ▸ bush (474)
+    ▸ flower (454)
+    ▸ tree (212)
+▾ Creatures (5)
+  ▾ rat (5)
+      ▾ rat #1
+          position: (13, 88)
+          age: 2
+          hunger: 3
+          sleep: 0
+          asleep: false
+        ▾ needs (2)
+            feed: 0
+            sleep: 0
+      ▸ rat #2 ... #5
+▸ Drops (0)
+```
+
+Vegetation and drops are grouped by `type`/`item`; creatures are grouped by
+`type` and then broken out per-instance, each showing its raw stats plus a
+nested `needs` group with the server's *currently computed* need values (see
+`creatures[].needs` in §5). Expand/collapse state is preserved across the
+1-second poll (tracked client-side by a stable `data-key` per node), so the
+tree doesn't jump around while you're inspecting it.
+
+This route is a debugging convenience, not a stable API contract — its HTML
+structure/styling may change between versions. Third-party clients should
+use `GET /state` directly rather than scraping this page.
 
 ### `GET /health`
 
@@ -172,11 +210,12 @@ are plain JSON numbers (ints unless noted); all coordinates are integers.
     "texture": "textures/grass.png"
   },
   "vegetation": [
-    { "x": 12, "z": 7, "block_id": 2, "age": 1 }
+    { "x": 12, "z": 7, "block_id": 2, "type": "flower", "age": 1 }
   ],
   "creatures": [
     { "id": 3, "type": "rat", "x": 10, "z": 44,
-      "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false }
+      "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false,
+      "needs": { "feed": 1, "sleep": 0.5 } }
   ],
   "drops": [
     { "id": 9, "item": "berry", "count": 2, "x": 5, "z": 5, "age": 3.2 }
@@ -233,13 +272,14 @@ immediately after boot in most runs.
 ### `vegetation[]` — one entry per flora block
 
 ```json
-{ "x": 12, "z": 7, "block_id": 2, "age": 1 }
+{ "x": 12, "z": 7, "block_id": 2, "type": "flower", "age": 1 }
 ```
 
 | Field | Type | Semantics |
 |-------|------|-----------|
 | `x`, `z` | int | Block position on the surface layer (`y` is always `chunk.surface_y`) |
 | `block_id` | int | Raw terrain block ID from [`chunk.py`](./chunk.py): `2` = flower, `3` = bush, `4` = tree (`0`=air, `1`=grass never appear here — only actual flora blocks are listed) |
+| `type` | string | Vegetation definition name from `entities.json`'s `vegetation[]` (`"flower"`, `"bush"`, `"tree"`) — the human-readable equivalent of `block_id`; look this up to get stage/texture metadata (see §9) |
 | `age` | int \| `null` | Current vegetation age used to resolve the growth **stage** (see §9). **Nullable**: it is `null` only in the edge case where a flora block exists on the map but has no tracked age yet (e.g. a freshly loaded/foreign save missing that entry). Treat `null` the same as "unknown — use the definition's `initial_age`" the way [`main.py`](./main.py) does. |
 
 There is **no** entry for empty/grass/air tiles — the array only lists
@@ -250,7 +290,8 @@ vegetation exists, not to world size.
 
 ```json
 { "id": 3, "type": "rat", "x": 10, "z": 44,
-  "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false }
+  "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false,
+  "needs": { "feed": 1, "sleep": 0.5 } }
 ```
 
 | Field | Type | Semantics |
@@ -262,6 +303,7 @@ vegetation exists, not to world size.
 | `hunger` | int | Current hunger/satiation counter, `0`..`initial_hunger` (from `entities.json`); decreases food need, increases (up to the cap) when eating |
 | `sleep` | float | Current sleep-need accumulator. **Not capped/thresholded** — it just competes against `feed` need for priority each move tick; resets to `0.0` at dawn or immediately on waking. Present (defaulting to `0.0`) even for creature types that don't define a `sleep` need. |
 | `asleep` | bool | `true` while the creature has chosen to sleep (stops moving at night); always resets to `false` at dawn. Client should swap to the definition's `sleep_texture` while this is `true` (see §9). |
+| `needs` | object | The server's **currently computed** need→priority map for this instance (same values `_creature_move` uses to decide behavior this tick), keyed by whichever needs are listed in the creature's `entities.json` definition (e.g. `{"feed": 1, "sleep": 0.5}`). `feed` is `max(0, initial_hunger - hunger)`; `sleep` mirrors the `sleep` field but reads as `0` while `asleep` is `true`. A creature with no configured needs reports `{}`. This is derived/informational — you don't need it to render the world, only to inspect *why* a creature is behaving a certain way (see the `/` inspector page, §4a). |
 
 Creatures never appear/disappear mid-array-shuffle — entries are only added
 (birth in summer) or removed (death from starvation/old age/winter) between

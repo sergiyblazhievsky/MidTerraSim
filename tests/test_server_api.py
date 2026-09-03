@@ -64,6 +64,18 @@ def test_state_response_has_json_content_type(running_server):
         assert resp.headers.get("Content-Type") == "application/json"
 
 
+def test_root_serves_the_html_inspector_page(running_server):
+    base_url, _ = running_server
+    with urllib.request.urlopen(f"{base_url}/", timeout=5) as resp:
+        assert resp.status == 200
+        assert resp.headers.get("Content-Type") == "text/html; charset=utf-8"
+        body = resp.read().decode("utf-8")
+
+    assert "<html" in body.lower()
+    assert "Server Inspector" in body
+    assert "/state" in body  # the page polls the JSON API client-side
+
+
 def test_save_forces_a_write_to_the_world_file(running_server, isolated_paths):
     base_url, world = running_server
     world_path = isolated_paths["world_path"]
