@@ -106,8 +106,7 @@ the ground and grass. `dwellers: ["rat", "rabbit"]` (matched by creature name
 `break_chance: 0.2` drive seasonal weathering; `contains` is a persisted but
 so-far-unused larder for dwellers stashing food.
 
-Texture is `textures/burrow_grass_64.png` — see [Texture Assets](#texture-assets),
-it isn't in the repo yet.
+Texture is `textures/burrow_grass_64.png` — see [Texture Assets](#texture-assets).
 
 Block IDs: `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRASS_PATCH=5`
 
@@ -261,7 +260,8 @@ frame times spike from actual mesh building.
 - **16×16** — ground tiles (`soil*.png`, `grass.png` surface cover), drop icons (`*_16.png`)
 - **64×64 cross** — vegetation billboards (`*_xcross_64.png`) for flower/bush/tree
 - Grass patches are **not** cross-billboards; they use opaque `textures/grass.png` as a flat surface mesh
-- Structures are flat surface meshes too, one layer above grass — burrow uses `textures/burrow_grass_64.png`. **That file isn't in the repo yet**; `main.py` falls back to a flat brown quad when `load_texture` returns `None`, so a missing structure texture degrades instead of breaking
+- Structures are flat surface meshes too, one layer above grass — burrow uses opaque 64×64 `textures/burrow_grass_64.png`, with its grass background baked in (so it keeps summer grass on fall/winter ground — revisit with an alpha surround or per-season variants if that reads badly)
+- A structure whose texture won't load falls back to a flat brown quad (`main.py` checks `load_texture` for `None`), so missing art degrades instead of breaking. Ursina caches the miss per process: after adding a texture file, **restart the client** or it keeps drawing the fallback
 - `generate_chunk.py` also generates legacy `textures/seed.png`; runtime drops use `*_16.png`
 
 ---
