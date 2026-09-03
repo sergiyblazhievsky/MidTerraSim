@@ -2,7 +2,9 @@
 
 Handoff document for continuing work in a new chat. Last updated 2026-09-03
 (rabbits, per-season reproduction, grass as a soft under-layer, player
-fall-through fix — see [Gotchas](#gotchas) before touching player height).
+fall-through fix — see [Gotchas](#gotchas) before touching player height —
+world-file persistence of fauna + the simulation clock, and a data-driven
+`feed_radius`).
 
 ---
 
@@ -36,7 +38,36 @@ Requirements: `pip install ursina pillow`
 |------|------|
 | `config.json` | Timing, seasons, `drop_lifetime` — hot-reloaded every frame |
 | `entities.json` | Items, vegetation, creatures — loaded at startup |
-| `chunks/chunk_0_0.wrld` | Saved world (gitignored) |
+| `chunks/chunk_0_0.wrld` | Saved world, format `version: 2` (gitignored) |
+
+### World file persistence
+
+`Chunk` (in `chunk.py`) owns the `.wrld` format and saves terrain,
+`vegetation_ages`, **fauna, and the simulation clock**: `creatures` is
+`{name: [instance, ...]}` keyed by `entities.json` creature name, plus a
+`next_creature_id` counter and a `time` section (`cycle`/`season`/`day`).
+
+- Server side: `_load_or_seed_creatures()` + `_restore_clock()` on startup,
+  `_store_creatures_in_chunk()` + `_store_clock_in_chunk()` on every `save()`.
+- A saved season is validated against `config.json`; an unknown name warns and
+  falls back to `DEFAULT_SEASON`. The four default seasons are always merged
+  into the config, so that fallback can't itself `KeyError`.
+- `_restore_clock()` also seeds `_prev_is_day` from the *current* phase instead
+  of assuming day. Assuming day meant a server started at night swallowed the
+  next dawn (`is_day == _prev_is_day`, so the edge never fired) and undercounted
+  `current_day` by one.
+- `speed_multiplier`/`_time_offset` are initialized early in `World.__init__`
+  because `_restore_clock()` reads `_effective_time()`.
+- Matching is **by name**, so reordering `entities.json` is safe and a species
+  the file has never seen (as the rabbit was) is seeded fresh rather than
+  needing `generate_chunk.py`.
+- `{}` (a version-1 file) means "no fauna data, seed it"; `{"rat": []}` means
+  "the rats died, leave it empty" — don't collapse those two cases.
+- `Chunk.normalize_creature()` coerces field types on load and drops entries
+  without a usable `id`/`x`/`z`, so a hand-edited file can't feed strings into
+  the simulation.
+- Not persisted: item drops (their `age` is measured against simulation time),
+  revision counters, the day/night phase (wall-clock derived), `speed_multiplier`.
 
 ### API documentation
 
@@ -59,8 +90,8 @@ default to `"cross"` (vertical billboard).
 
 **Creatures** — rat + rabbit with `needs: ["feed", "sleep"]`. Rat
 `diet: ["food"]` (item drops + flower attacks). Rabbit
-`diet: ["grass", "bush"]` (eat grass cover, else browse bushes within
-`feed_radius`).
+`diet: ["grass", "bush"]` (eat grass cover, else browse bushes). Both declare
+`feed_radius` (rat 5, rabbit 6), which caps the food search on either path.
 
 Block IDs: `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRASS_PATCH=5`
 
@@ -136,8 +167,10 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 | Entity loading | `load_entities()`, `_veg_with_tag()`, `_items_with_tag()`, `_resolve_diet()` |
 | World drops | `_spawn_drop()`, `_drop_from()`, `_update_drops()` |
 | Simulation | `_sim_step()`, `_count_kind_near()`, `tick()` |
-| Creature AI | `_compute_creature_needs()`, `_act_feed()`, `_creature_move()`, `_eat_food_at_block()` |
+| Creature AI | `_compute_creature_needs()`, `_act_feed()`, `_act_feed_plants()`, `_feed_radius()`, `_creature_move()`, `_eat_food_at_block()` |
 | Lifecycle | `_on_day_start()`, `_on_season_start()`, `_spawn_creature_at()`, `_remove_creature()` |
+| Fauna persistence | `_load_or_seed_creatures()`, `_restore_creature_type()`, `_seed_creature_type()`, `_store_creatures_in_chunk()`, `save()` |
+| Clock persistence | `_restore_clock()`, `_store_clock_in_chunk()`, `DEFAULT_SEASON`, `DAY_FRACTION` |
 | API | `snapshot()`, `make_handler()` (GET `/health`, `/state`; POST `/save`) |
 
 `main.py` (rendering only):
@@ -227,7 +260,10 @@ frame times spike from actual mesh building.
 21. Added the **rabbit**: herbivore with `diet: ["grass", "bush"]` — eats grass cover off its tile, else seeks grass within `feed_radius`, else browses bushes (age −`attack`); drops 2–3 meat
 22. Runtime grass no longer blocks other flora — `ground_cover`-tagged vegetation is a soft under-layer, so flower/bush/tree can claim a grassy tile
 23. Fixed endless player fall-through (thick floor collider + on-floor spawn + recovery guard) — see [Gotchas](#gotchas)
-24. Added [`roadmap.md`](./roadmap.md) backlog; linked from README
+24. Fauna is now persisted in the world file (`.wrld` format `version: 2`) — creatures were previously reseeded on every server start while vegetation survived
+25. The simulation clock (season/cycle/day) is persisted too, so a restart no longer snaps the world back to spring day 0
+26. `feed_radius` is now data-driven for rats too (was hardcoded 5 in `_find_nearest_food_drop`/`_find_nearest_flower`); both feed paths read it through `_feed_radius()`
+27. Added [`roadmap.md`](./roadmap.md) backlog; linked from README
 
 ## Session Work Log (2026-09-02)
 
@@ -258,12 +294,15 @@ frame times spike from actual mesh building.
 
 `diet` drives *which* feed AI runs: item names/tags → drops + flower attacks
 (`_act_feed`); vegetation names/tags → grazing/browsing (`_act_feed_plants`).
+`feed_radius` caps the search distance on both paths via `_feed_radius(cdef)`
+(fallback `DEFAULT_FEED_RADIUS = 5`).
 
 ```json
 {
   "name": "rat",
   "needs": ["feed", "sleep"],
   "diet": ["food"],
+  "feed_radius": 5,
   "initial_hunger": 3,
   "attack": 1,
   "sleep_gain": 0.5,

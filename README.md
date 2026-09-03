@@ -36,7 +36,11 @@ python main.py
 - Stop the server with **Ctrl+C** in its console — it saves the world before exiting.
 - CLI overrides are available on both: `python server.py --host 0.0.0.0 --port 8765`, `python main.py --host 127.0.0.1 --port 8765`.
 
-World state is saved to `chunks/chunk_0_0.wrld` periodically (`server.save_interval` in `config.json`) and on clean shutdown. To regenerate a fresh world with procedural textures:
+World state is saved to `chunks/chunk_0_0.wrld` periodically (`server.save_interval` in `config.json`), on `POST /save`, and on clean shutdown. That includes **flora, fauna, and the simulation clock**: every creature's tile, age, hunger, sleep state and `id`, plus the current season, cycle counter and day number. A restarted server therefore picks up the same population, in the same season, where it left off rather than reseeding a fresh spring world. Item drops are *not* persisted (their lifetime is tied to simulation time), and the day/night phase isn't either — it's derived from the wall clock.
+
+The save format is at `version: 2` (see [`chunk.py`](./chunk.py)'s module docstring for the full JSON shape). Older `version: 1` files still load — they simply have no fauna or clock to restore, so the server seeds a fresh population and starts at spring, day 0.
+
+To regenerate a fresh world with procedural textures:
 
 ```
 python generate_chunk.py
@@ -97,9 +101,12 @@ Current coverage: **100%** on `chunk.py`, **95%** on `server.py` (the only uncov
 What's covered:
 - Config loading/merging/hot-reload (`load_config`, `maybe_reload_config`)
 - World seeding, tag/diet/avoidance resolution, vegetation stage lookup
+- Fauna persistence: saving live creatures into the world file, restoring them on load, keeping ids unique, and seeding any species the file doesn't know about
+- Clock persistence: resuming season/cycle/day, falling back when a saved season is no longer in `config.json`, and seeding the day/night edge from the current phase
 - Item drops: spawn, stage-specific loot, expiry, and pickup (including diet/sleep gating)
 - Flower attack/eat-in-place feeding
 - Herbivore plant diets (`_resolve_plant_diet`, `_act_feed_plants`): grazing ground cover, browsing bushes, and seeking the nearest plant within `feed_radius`
+- `feed_radius` resolution (`_feed_radius`) and its effect on both the carnivore and herbivore search paths
 - Creature pathfinding primitives (`_step_toward`, `_find_nearest_*`, `_move_creature_random`)
 - Creature needs/sleep state machine (`_compute_creature_needs`, `_pick_highest_need`, `_act_feed`, `_creature_move`)
 - Daily/seasonal lifecycle (hunger/age decay, winter aging, reproduction each season change, removal)
@@ -225,9 +232,19 @@ Defines items, vegetation, and creatures. Loaded independently by **both** `serv
 `diet` entries are resolved against both items and vegetation, by name or by
 tag: matching **items** make a carnivore/scavenger that eats drops and attacks
 flowers (rat), while matching **vegetation** makes a herbivore that grazes and
-browses plants within `feed_radius` (rabbit). Diet order is preference order.
+browses plants (rabbit). Diet order is preference order.
+
+`feed_radius` caps how far a hungry creature will look for its food, in
+Manhattan tiles, and applies to *both* paths — drop/flower search for
+carnivores, plant search for herbivores. It defaults to
+`server.DEFAULT_FEED_RADIUS` (5) when a definition omits it, but both shipped
+creatures declare it explicitly (rat 5, rabbit 6).
 
 Block IDs (`chunk.py`): `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRASS_PATCH=5`
+
+Creature definitions are matched to saved fauna **by `name`**, so reordering
+`entities.json` is safe, and a species the world file has never seen is seeded
+fresh on load instead of requiring a world regeneration.
 
 #### Spawn priority (runtime)
 
@@ -290,13 +307,13 @@ When hungry (`feed` need = `initial_hunger - hunger`):
 
 1. Eat food drops on same tile (seed, berry, meat — resolved via `food` tag)
 2. Attack flower on same tile (reduce age by `attack`)
-3. Move toward nearest food drop within 5 blocks
-4. Move toward nearest dead flower, then live flower
+3. Move toward nearest food drop within `feed_radius` (5 for rats)
+4. Move toward nearest dead flower, then live flower — same `feed_radius`
 5. Random move if nothing found
 
 ### Creature feed AI (rabbits)
 
-Herbivore diet (`diet: ["grass", "bush"]`, search radius `feed_radius` default 6):
+Herbivore diet (`diet: ["grass", "bush"]`, search radius `feed_radius`, 6 for rabbits):
 
 1. If standing on grass cover — eat it (tile returns to bare soil), +1 hunger
 2. Else move toward nearest grass within `feed_radius`

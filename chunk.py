@@ -3,13 +3,32 @@ Chunk API — import this from external editors/tools too.
 
 JSON format:
   {
-    "version": 1,
+    "version": 2,
     "size": [100, 100, 100],   # X, Y, Z dimensions
     "fill": "grass",            # default block for every unspecified position
     "overrides": {              # sparse per-block overrides, key = "x,y,z"
       "50,99,50": "air"
+    },
+    "vegetation_ages": {        # per-column plant age, key = "x,z"
+      "50,50": 7
+    },
+    "creatures": {              # live fauna, keyed by entities.json name
+      "rat": [
+        {"id": 3, "x": 10, "z": 44, "age": 2, "hunger": 3,
+         "attack": 1, "sleep": 0.0, "asleep": false}
+      ]
+    },
+    "next_creature_id": 12,     # so ids stay unique across save/load
+    "time": {                   # simulation clock; season is an entities/config
+      "cycle": 41,              # season name, null when never saved
+      "season": "fall",
+      "day": 6
     }
   }
+
+Version 1 files (no "creatures"/"next_creature_id"/"time") still load; the
+caller decides whether to seed fauna and where to start the clock when a
+section is absent.
 """
 
 import json
@@ -31,6 +50,23 @@ BLOCK_IDS   = {v: k for k, v in BLOCK_NAMES.items()}
 
 _DEFAULT_VEGETATION_AGE = {FLOWER: 2, BUSH: 5, TREE: 10, GRASS_PATCH: 5}
 
+FORMAT_VERSION = 2
+
+
+def _as_int(value, default):
+    """Tolerant int coercion for hand-edited save files."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+# One saved fauna instance: field -> coercion applied on load, so a
+# hand-edited or older file can't inject strings into the simulation.
+_CREATURE_FIELDS = {
+    'id': int, 'x': int, 'z': int, 'age': int, 'hunger': int,
+    'attack': int, 'sleep': float, 'asleep': bool,
+}
+
 
 class Chunk:
     def __init__(self, size=(100, 100, 100), moisture=0, fertility=0):
@@ -40,6 +76,17 @@ class Chunk:
         self._fill            = AIR
         self._overrides       = {}   # {(x, y, z): block_id}
         self.vegetation_ages  = {}  # {(x, z): age}
+        # {creature_name: [instance dict, ...]} — see _CREATURE_FIELDS. Empty
+        # means "this world has no saved fauna", which is distinct from a
+        # world whose fauna all died ({"rat": []}).
+        self.creatures        = {}
+        self.next_creature_id = 0
+        # Simulation clock. season is None until something saves one; the
+        # server decides the starting season in that case (and validates a
+        # saved name against config.json's seasons).
+        self.cycle            = 0
+        self.season           = None
+        self.day              = 0
 
     # ── block access ────────────────────────────────────────────────────────
 
@@ -62,6 +109,24 @@ class Chunk:
         self._fill = block_id
         self._overrides.clear()
         self.vegetation_ages.clear()
+
+    # ── fauna ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def normalize_creature(raw):
+        """Coerce one saved fauna instance into the expected field types.
+        Returns None if a required position/identity field is unusable."""
+        inst = {}
+        for field, cast in _CREATURE_FIELDS.items():
+            if field not in raw:
+                continue
+            try:
+                inst[field] = cast(raw[field])
+            except (TypeError, ValueError):
+                return None
+        if not all(f in inst for f in ('id', 'x', 'z')):
+            return None
+        return inst
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -94,7 +159,7 @@ class Chunk:
         with open(path, "w") as f:
             json.dump(
                 {
-                    "version": 1,
+                    "version": FORMAT_VERSION,
                     "size": list(self.size),
                     "moisture": self.moisture,
                     "fertility": self.fertility,
@@ -106,6 +171,16 @@ class Chunk:
                     "vegetation_ages": {
                         f"{x},{z}": age
                         for (x, z), age in self.vegetation_ages.items()
+                    },
+                    "creatures": {
+                        name: list(instances)
+                        for name, instances in self.creatures.items()
+                    },
+                    "next_creature_id": self.next_creature_id,
+                    "time": {
+                        "cycle": self.cycle,
+                        "season": self.season,
+                        "day": self.day,
                     },
                 },
                 f, indent=2,
@@ -127,6 +202,27 @@ class Chunk:
         for key, age in raw.get("vegetation_ages", {}).items():
             x, z = map(int, key.split(","))
             c.vegetation_ages[(x, z)] = int(age)
+
+        c.creatures = {}
+        for name, instances in (raw.get("creatures") or {}).items():
+            if not isinstance(instances, list):
+                continue
+            restored = [inst for inst in (
+                c.normalize_creature(i) for i in instances if isinstance(i, dict)
+            ) if inst is not None]
+            c.creatures[str(name)] = restored
+
+        highest_id = max(
+            (inst["id"] for instances in c.creatures.values() for inst in instances),
+            default=0,
+        )
+        c.next_creature_id = max(int(raw.get("next_creature_id", 0)), highest_id)
+
+        saved_time = raw.get("time") or {}
+        c.cycle  = _as_int(saved_time.get("cycle"), 0)
+        c.day    = _as_int(saved_time.get("day"), 0)
+        season   = saved_time.get("season")
+        c.season = str(season) if season else None
 
         for x in range(c.size[0]):
             for z in range(c.size[2]):

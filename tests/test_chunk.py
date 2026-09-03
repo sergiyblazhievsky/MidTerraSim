@@ -147,10 +147,11 @@ def test_save_writes_valid_json_with_expected_top_level_keys(tmp_path):
     c.save(str(path))
 
     raw = json.loads(path.read_text())
-    assert raw["version"] == 1
+    assert raw["version"] == 2
     assert raw["size"] == [2, 2, 2]
     assert raw["fill"] == "grass"
-    for key in ("overrides", "vegetation_ages", "moisture", "fertility"):
+    for key in ("overrides", "vegetation_ages", "moisture", "fertility",
+                "creatures", "next_creature_id"):
         assert key in raw
 
 
@@ -184,3 +185,131 @@ def test_load_backfills_missing_vegetation_age_for_grass_patch(tmp_path):
 
     assert loaded.get_block(0, 1, 0) == GRASS_PATCH
     assert loaded.vegetation_ages[(0, 0)] == 5
+
+
+# ── fauna persistence ────────────────────────────────────────────────────────
+
+def test_creatures_survive_a_save_load_round_trip(tmp_path):
+    c = Chunk(size=(4, 2, 4))
+    c.fill(GRASS)
+    c.creatures = {
+        "rat": [{"id": 1, "x": 1, "z": 2, "age": 2, "hunger": 3,
+                 "attack": 1, "sleep": 0.5, "asleep": True}],
+        "rabbit": [{"id": 2, "x": 3, "z": 0, "age": 3, "hunger": 5,
+                    "attack": 1, "sleep": 0.0, "asleep": False}],
+    }
+    c.next_creature_id = 7
+    path = tmp_path / "fauna.wrld"
+
+    c.save(str(path))
+    loaded = Chunk.load(str(path))
+
+    assert loaded.creatures["rat"] == c.creatures["rat"]
+    assert loaded.creatures["rabbit"] == c.creatures["rabbit"]
+    assert loaded.next_creature_id == 7
+
+
+def test_load_leaves_creatures_empty_for_a_version_1_file(tmp_path):
+    # A pre-fauna save must be distinguishable from "every creature died",
+    # so the server knows to seed rather than restore an empty world.
+    raw = {"version": 1, "size": [2, 2, 2], "fill": "grass", "overrides": {}}
+    path = tmp_path / "legacy.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert loaded.creatures == {}
+    assert loaded.next_creature_id == 0
+
+
+def test_load_keeps_an_explicitly_empty_creature_list(tmp_path):
+    raw = {"version": 2, "size": [2, 2, 2], "fill": "grass", "overrides": {},
+           "creatures": {"rat": []}, "next_creature_id": 4}
+    path = tmp_path / "extinct.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert loaded.creatures == {"rat": []}
+    assert loaded.next_creature_id == 4
+
+
+def test_load_coerces_creature_field_types_and_drops_broken_entries(tmp_path):
+    raw = {
+        "version": 2, "size": [4, 2, 4], "fill": "grass", "overrides": {},
+        "creatures": {"rat": [
+            {"id": "5", "x": "1", "z": 2, "age": "2", "hunger": 3,
+             "attack": 1, "sleep": "0.5", "asleep": True},
+            {"id": 6, "x": "not-a-number", "z": 0},   # unusable position
+            {"x": 1, "z": 1},                          # no id
+            "nonsense",
+        ]},
+    }
+    path = tmp_path / "messy.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert loaded.creatures["rat"] == [
+        {"id": 5, "x": 1, "z": 2, "age": 2, "hunger": 3,
+         "attack": 1, "sleep": 0.5, "asleep": True}
+    ]
+
+
+def test_load_defaults_the_clock_when_the_time_section_is_absent(tmp_path):
+    raw = {"version": 1, "size": [2, 2, 2], "fill": "grass", "overrides": {}}
+    path = tmp_path / "legacy_clock.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert (loaded.cycle, loaded.season, loaded.day) == (0, None, 0)
+
+
+def test_clock_survives_a_save_load_round_trip(tmp_path):
+    c = Chunk(size=(2, 2, 2))
+    c.fill(GRASS)
+    c.cycle, c.season, c.day = 41, "fall", 6
+    path = tmp_path / "clock.wrld"
+
+    c.save(str(path))
+    loaded = Chunk.load(str(path))
+
+    assert (loaded.cycle, loaded.season, loaded.day) == (41, "fall", 6)
+
+
+def test_load_tolerates_a_malformed_clock(tmp_path):
+    raw = {"version": 2, "size": [2, 2, 2], "fill": "grass", "overrides": {},
+           "time": {"cycle": "nope", "season": "", "day": None}}
+    path = tmp_path / "bad_clock.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert (loaded.cycle, loaded.season, loaded.day) == (0, None, 0)
+
+
+def test_load_skips_a_creature_entry_that_is_not_a_list(tmp_path):
+    raw = {"version": 2, "size": [2, 2, 2], "fill": "grass", "overrides": {},
+           "creatures": {"rat": "oops", "rabbit": [{"id": 1, "x": 0, "z": 0}]}}
+    path = tmp_path / "malformed.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert "rat" not in loaded.creatures
+    assert len(loaded.creatures["rabbit"]) == 1
+
+
+def test_load_derives_next_creature_id_from_the_highest_saved_id(tmp_path):
+    raw = {
+        "version": 2, "size": [2, 2, 2], "fill": "grass", "overrides": {},
+        "creatures": {"rat": [{"id": 9, "x": 0, "z": 0}]},
+        "next_creature_id": 2,   # stale/lower than a live id
+    }
+    path = tmp_path / "stale_id.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert loaded.next_creature_id == 9

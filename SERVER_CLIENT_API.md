@@ -340,7 +340,7 @@ vegetation exists, not to world size.
 
 | Field | Type | Semantics |
 |-------|------|-----------|
-| `id` | int | **Stable, per-instance identifier**, assigned once at spawn/birth and never reused or renumbered. It is *not* an array index — safe to use as a dictionary/map key across polls to add/update/remove individual entities instead of rebuilding the whole list. IDs are monotonically increasing per server session and reset to start again from `1` only on server restart. |
+| `id` | int | **Stable, per-instance identifier**, assigned once at spawn/birth and never reused or renumbered. It is *not* an array index — safe to use as a dictionary/map key across polls to add/update/remove individual entities instead of rebuilding the whole list. IDs are monotonically increasing and **survive a server restart**: creatures are saved to `chunks/chunk_0_0.wrld` and restored with their ids intact (see §8). Don't rely on that for correctness though — a restart still resets `revision`, which is your signal to rebuild from scratch. |
 | `type` | string | Creature definition name from [`entities.json`](./entities.json) (e.g. `"rat"`, `"rabbit"`) — look this up in `entities.json`'s `creatures[]` to get texture/behavior metadata (see §9) |
 | `x`, `z` | int | Current tile position (`y` is always `chunk.surface_y + y_offset` from the creature's definition, entirely a client-side rendering concern) |
 | `age` | int | Remaining lifespan in "age units"; decremented once per day once `hunger` is `0`, or once per winter start; creature is removed when `age <= 0` |
@@ -373,17 +373,32 @@ snapshots; existing IDs' fields update in place.
 
 | Concept | Resets when | Use it to… |
 |---|---|---|
-| `creatures[].id` | Server restart | Track/diff individual creatures across polls |
+| `creatures[].id` | Never (persisted) | Track/diff individual creatures across polls |
 | `drops[].id` | Server restart | Track/diff individual drops across polls |
 | `revision` | Server restart | Detect *any* tick has happened / detect restart (goes backwards) |
 | `vegetation_revision` | Server restart | Detect flora actually changed (rebuild vegetation meshes only when needed) |
 
-None of these IDs or counters are persisted across a server restart (they
-are in-memory only, reset by `World.__init__`), even though the underlying
-world's terrain/vegetation *ages* are persisted to `chunks/chunk_0_0.wrld`.
-A fresh server process therefore reissues creature/drop IDs starting near
-`1` again and resets both revisions to `0`, even though it may load
-pre-existing vegetation from the saved world file.
+What the world file (`chunks/chunk_0_0.wrld`) keeps across a restart:
+
+- Terrain, vegetation, and their ages.
+- **All live fauna** — each creature's tile, age, hunger, sleep state and
+  `id`, plus the id counter, so a reloaded world neither reseeds its
+  population nor reissues an id that's already in use.
+- **The simulation clock** — `time.season`, `time.cycle` and `time.day` all
+  resume where they left off, so a restart no longer snaps the world back to
+  spring, day 0.
+
+What it does *not* keep: item drops (their `age` is measured against
+simulation time, so they're dropped rather than resurrected with a bogus
+lifetime), `drops[].id`, both revision counters, and `speed_multiplier`. A
+fresh server process therefore starts both revisions at `0` and reissues drop
+IDs from near `1`.
+
+`time.is_day` and `time.phase` are derived from the wall clock, not saved:
+there is nothing meaningful to carry across a restart. The server does seed
+its internal night→day edge detector from whichever phase the world is
+actually in at startup, so `time.day` still advances at the first dawn after
+a restart that happened during the night.
 
 ---
 

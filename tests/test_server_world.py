@@ -86,6 +86,179 @@ def test_seeded_rabbit_stats_use_entity_defaults(world):
     assert st["attack"] == 1
 
 
+# ── clock persistence ────────────────────────────────────────────────────────
+
+def test_a_fresh_world_file_starts_the_clock_at_spring_day_zero(world):
+    assert world.current_season == "spring"
+    assert world.current_cycle == 0
+    assert world.current_day == 0
+
+
+def test_clock_is_restored_from_the_world_file(world):
+    world.current_cycle = 41
+    world.current_day = 6
+    world._apply_season("fall")
+
+    world.save()
+    reloaded = server_module.World()
+
+    assert reloaded.current_cycle == 41
+    assert reloaded.current_day == 6
+    assert reloaded.current_season == "fall"
+
+
+def test_save_writes_the_clock_into_the_world_file(world, isolated_paths):
+    world.current_cycle = 12
+    world.current_day = 3
+    world._apply_season("winter")
+
+    world.save()
+
+    raw = json.loads(isolated_paths["world_path"].read_text(encoding="utf-8"))
+    assert raw["time"] == {"cycle": 12, "season": "winter", "day": 3}
+
+
+def test_restored_season_reapplies_its_moisture_and_fertility(world):
+    world._apply_season("winter")
+    world.save()
+
+    reloaded = server_module.World()
+
+    winter = server_module.load_config()["seasons"]["winter"]
+    assert reloaded.chunk.moisture == winter["moisture"]
+    assert reloaded.chunk.fertility == winter["fertility"]
+    assert reloaded._terrain_texture == f'textures/{winter["texture"]}'
+
+
+def test_a_saved_season_missing_from_config_falls_back_to_the_default(world, capsys):
+    # config.json can be edited between runs; an unknown season name must not
+    # take down startup with a KeyError.
+    world.chunk.season = "monsoon"
+    world.chunk.save(server_module.WORLD_FILE)
+
+    reloaded = server_module.World()
+
+    assert reloaded.current_season == server_module.DEFAULT_SEASON
+    assert "monsoon" in capsys.readouterr().out
+
+
+def test_a_negative_saved_cycle_or_day_is_clamped_to_zero(world):
+    world.chunk.cycle = -5
+    world.chunk.day = -1
+    world.chunk.season = "spring"
+    world.chunk.save(server_module.WORLD_FILE)
+
+    reloaded = server_module.World()
+
+    assert reloaded.current_cycle == 0
+    assert reloaded.current_day == 0
+
+
+@pytest.mark.parametrize("now, expected_is_day", [
+    (0.0, True),    # phase 0.0  -> morning
+    (50.0, False),  # phase 0.83 -> night (day_night_cycle is 60 in TEST_CONFIG)
+])
+def test_startup_seeds_prev_is_day_from_the_current_phase(
+    isolated_paths, monkeypatch, now, expected_is_day
+):
+    monkeypatch.setattr(server_module.time, "time", lambda: now)
+
+    assert server_module.World()._prev_is_day is expected_is_day
+
+
+def test_a_server_started_at_night_still_counts_the_following_dawn(
+    isolated_paths, monkeypatch
+):
+    monkeypatch.setattr(server_module.time, "time", lambda: 50.0)  # night
+    night_world = server_module.World()
+    before_day = night_world.current_day
+
+    monkeypatch.setattr(server_module.time, "time", lambda: 0.0)  # dawn
+    night_world.tick(dt=0.01)
+
+    assert night_world.current_day == before_day + 1
+
+
+# ── fauna persistence ────────────────────────────────────────────────────────
+
+def test_fauna_is_restored_from_the_world_file_instead_of_reseeded(world):
+    ci = 0
+    world.all_creature_positions[ci] = [(2, 3)]
+    world.all_creature_stats[ci] = [{
+        "id": 42, "age": 1, "hunger": 2, "attack": 5,
+        "sleep": 0.5, "asleep": True,
+    }]
+
+    world.save()
+    reloaded = server_module.World()
+
+    assert reloaded.all_creature_positions[ci] == [(2, 3)]
+    assert reloaded.all_creature_stats[ci] == [{
+        "id": 42, "age": 1, "hunger": 2, "attack": 5,
+        "sleep": 0.5, "asleep": True,
+    }]
+
+
+def test_restored_fauna_keeps_ids_unique_for_newly_born_creatures(world):
+    ci = 0
+    world.all_creature_positions[ci] = [(1, 1)]
+    world.all_creature_stats[ci] = [{
+        "id": 99, "age": 2, "hunger": 3, "attack": 5,
+        "sleep": 0.0, "asleep": False,
+    }]
+
+    world.save()
+    reloaded = server_module.World()
+    reloaded._spawn_creature_at(ci, 2, 2)
+
+    assert reloaded.all_creature_stats[ci][-1]["id"] > 99
+
+
+def test_a_world_whose_fauna_all_died_stays_empty_after_reload(world):
+    # Distinct from a pre-fauna save file: an explicitly empty list must not
+    # be treated as "no data, please reseed".
+    for ci in range(len(world.creature_defs)):
+        world.all_creature_positions[ci] = []
+        world.all_creature_stats[ci] = []
+
+    world.save()
+    reloaded = server_module.World()
+
+    assert reloaded.all_creature_positions == [[] for _ in world.creature_defs]
+
+
+def test_creature_type_missing_from_the_world_file_is_seeded(world, isolated_paths):
+    # Adding a species to entities.json must not require regenerating the
+    # world: saved types are restored, unknown ones spawn fresh.
+    world.save()
+    raw = json.loads(isolated_paths["world_path"].read_text(encoding="utf-8"))
+    del raw["creatures"]["rabbit"]
+    isolated_paths["world_path"].write_text(json.dumps(raw), encoding="utf-8")
+
+    reloaded = server_module.World()
+
+    assert len(reloaded.all_creature_positions[0]) == len(world.all_creature_positions[0])
+    assert len(reloaded.all_creature_positions[1]) == 2  # rabbit count from entities.json
+
+
+def test_save_writes_live_fauna_into_the_world_file(world, isolated_paths):
+    ci = 0
+    world.all_creature_positions[ci] = [(4, 5)]
+    world.all_creature_stats[ci] = [{
+        "id": 7, "age": 2, "hunger": 1, "attack": 5,
+        "sleep": 0.0, "asleep": False,
+    }]
+
+    world.save()
+
+    raw = json.loads(isolated_paths["world_path"].read_text(encoding="utf-8"))
+    assert raw["creatures"]["rat"] == [{
+        "id": 7, "x": 4, "z": 5, "age": 2, "hunger": 1,
+        "attack": 5, "sleep": 0.0, "asleep": False,
+    }]
+    assert raw["next_creature_id"] >= 7
+
+
 def test_seed_creatures_falls_back_when_every_tile_is_avoided(world):
     # rat avoids tiles tagged "tree"; force every tile to be a tree and
     # confirm _seed_creatures still returns a position for every requested
@@ -555,6 +728,88 @@ def test_move_creature_random_stays_put_when_every_neighbor_is_blocked(world):
 def test_move_creature_random_returns_an_adjacent_tile_when_unblocked(world):
     nx, nz = world._move_creature_random(2, 2, avoids=set())
     assert abs(nx - 2) + abs(nz - 2) == 1
+
+
+# ── feed_radius ───────────────────────────────────────────────────────────────
+
+def test_feed_radius_comes_from_the_creature_definition(world):
+    assert world._feed_radius({"feed_radius": 9}) == 9
+
+
+def test_feed_radius_falls_back_to_the_default_when_undeclared(world):
+    assert world._feed_radius({}) == server_module.DEFAULT_FEED_RADIUS
+
+
+@pytest.mark.parametrize("value", ["far", None, [3]])
+def test_feed_radius_falls_back_to_the_default_for_an_unusable_value(world, value):
+    assert world._feed_radius({"feed_radius": value}) == server_module.DEFAULT_FEED_RADIUS
+
+
+def test_feed_radius_clamps_a_negative_value_to_zero(world):
+    assert world._feed_radius({"feed_radius": -4}) == 0
+
+
+def test_rat_and_rabbit_both_declare_a_feed_radius(world):
+    # Both definitions are explicit so behavior doesn't hinge on the fallback.
+    for cdef in world.creature_defs:
+        assert "feed_radius" in cdef
+
+
+def test_act_feed_chases_a_food_drop_inside_the_rats_feed_radius(world):
+    ci = 0
+    cdef = world.creature_defs[ci]
+    cdef["feed_radius"] = 5
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    world._spawn_drop("seed", 1, 4, 0)  # 4 tiles away, within the radius
+
+    result = world._act_feed(ci, 0, cdef, 0, 0, avoids=set())
+
+    assert result == (1, 0)  # first step toward the drop
+
+
+def test_act_feed_ignores_a_food_drop_outside_the_rats_feed_radius(world, monkeypatch):
+    ci = 0
+    cdef = world.creature_defs[ci]
+    cdef["feed_radius"] = 2
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    world._spawn_drop("seed", 1, 4, 0)  # 4 tiles away, out of reach now
+    wandered = ("wandered",)
+    monkeypatch.setattr(world, "_move_creature_random", lambda *a: wandered)
+
+    result = world._act_feed(ci, 0, cdef, 0, 0, avoids=set())
+
+    assert result == wandered
+
+
+def test_act_feed_ignores_a_flower_outside_the_rats_feed_radius(world, monkeypatch):
+    ci = 0
+    cdef = world.creature_defs[ci]
+    cdef["feed_radius"] = 2
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    world.chunk.set_block(2, world.SY, 2, FLOWER)  # 4 tiles away
+    world.chunk.vegetation_ages[(2, 2)] = 1
+    wandered = ("wandered",)
+    monkeypatch.setattr(world, "_move_creature_random", lambda *a: wandered)
+
+    result = world._act_feed(ci, 0, cdef, 0, 0, avoids=set())
+
+    assert result == wandered
+
+
+def test_act_feed_searches_drops_and_flowers_with_the_declared_radius(world, monkeypatch):
+    ci = 0
+    cdef = world.creature_defs[ci]
+    cdef["feed_radius"] = 4
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    seen = []
+    monkeypatch.setattr(world, "_find_nearest_food_drop",
+                        lambda *a, radius: seen.append(radius))
+    monkeypatch.setattr(world, "_find_nearest_flower",
+                        lambda *a, dead, radius: seen.append(radius))
+
+    world._act_feed(ci, 0, cdef, 0, 0, avoids=set())
+
+    assert seen == [4, 4, 4]  # drops, then dead flowers, then live flowers
 
 
 # ── _act_feed priority chain (eat > attack > chase food > chase flowers) ────

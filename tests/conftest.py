@@ -164,6 +164,7 @@ TEST_ENTITIES = {
             "sleep_gain": 0.5,
             "needs": ["feed", "sleep"],
             "diet": ["food"],
+            "feed_radius": 5,
             "hunger_per_food": 1,
             "contains": [{"item": "meat", "count": [1, 1]}],
         },

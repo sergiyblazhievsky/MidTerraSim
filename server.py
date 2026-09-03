@@ -36,6 +36,15 @@ WORLD_FILE = 'chunks/chunk_0_0.wrld'
 CONFIG_PATH = Path(__file__).with_name('config.json')
 ENTITIES_PATH = Path(__file__).with_name('entities.json')
 
+# Season a brand-new world starts in, and the fraction of each day/night
+# cycle that counts as daytime (40 of every 60 units).
+DEFAULT_SEASON = 'spring'
+DAY_FRACTION = 40.0 / 60.0
+
+# How far a hungry creature looks for food when its entities.json definition
+# doesn't say (`feed_radius`). Manhattan tiles.
+DEFAULT_FEED_RADIUS = 5
+
 DEFAULT_CONFIG = {
     'cycle_length': 300.0,
     'season_length': 10,
@@ -118,19 +127,25 @@ class World:
         self.sx, self.sy, self.sz = self.chunk.size
         self.SY = self.sy - 1
 
-        self.current_cycle = 0
-        self.current_season = 'spring'
-        self.current_day = 0
-        self._prev_is_day = True
-        self._phase = 0.0
+        # ── admin-controlled runtime state ─────────────────────────────────
+        # Not persisted to config.json or the world file -- intentionally
+        # transient, reset to the default on every server restart. Scales
+        # everything time-based (day/night, creature movement/needs ticks,
+        # the flora sim cycle, periodic saves, and item-drop aging) uniformly
+        # via an accumulated virtual-time offset added on top of the real
+        # wall clock -- see _effective_time(). Initialized before anything
+        # that reads _effective_time(), e.g. _restore_clock() below.
+        self.speed_multiplier = 1
+        self._time_offset = 0.0
+
         self._terrain_texture = 'textures/soil.png'
-        self._apply_season(self.current_season)
+        self._restore_clock()
 
         self.all_creature_positions = []
         self.all_creature_stats = []
         self._creature_timers = [0.0] * len(self.creature_defs)
         self._next_creature_id = 0
-        self._seed_creatures()
+        restored_names = self._load_or_seed_creatures()
 
         self.world_drops = []
         self._next_drop_id = 0
@@ -140,19 +155,13 @@ class World:
         self.revision = 0
         self.vegetation_revision = 0
 
-        # ── admin-controlled runtime state ─────────────────────────────────
-        # Not persisted to config.json or the world file -- intentionally
-        # transient, reset to the default on every server restart. Scales
-        # everything time-based (day/night, creature movement/needs ticks,
-        # the flora sim cycle, periodic saves, and item-drop aging) uniformly
-        # via an accumulated virtual-time offset added on top of the real
-        # wall clock -- see _effective_time().
-        self.speed_multiplier = 1
-        self._time_offset = 0.0
-
         print(f'[server] world loaded: {self.sx}x{self.sy}x{self.sz} (surface_y={self.SY})')
+        clock_source = 'resumed' if self.chunk.season else 'fresh'
+        print(f'[server] {clock_source} clock: season={self.current_season} '
+              f'cycle={self.current_cycle} day={self.current_day}')
         for ci, cdef in enumerate(self.creature_defs):
-            print(f'[server] spawned {len(self.all_creature_positions[ci])}x {cdef["name"]}')
+            source = 'restored' if cdef['name'] in restored_names else 'spawned'
+            print(f'[server] {source} {len(self.all_creature_positions[ci])}x {cdef["name"]}')
 
     # ── config ────────────────────────────────────────────────────────────
     def _apply_config(self, config):
@@ -273,6 +282,36 @@ class World:
                     count += 1
         return count
 
+    # ── simulation clock ──────────────────────────────────────────────────
+    def _restore_clock(self):
+        """Resume the cycle/season/day counters saved in the world file.
+
+        The day/night phase itself is *not* restored: it is derived from the
+        wall clock, so there is nothing meaningful to carry across a restart.
+        _prev_is_day is seeded from the phase the world is actually in right
+        now rather than assumed to be day, so a server started at night still
+        counts the dawn that follows (assuming daytime would swallow it, since
+        the night->day edge never fires)."""
+        self.current_cycle = max(0, self.chunk.cycle)
+        self.current_day = max(0, self.chunk.day)
+
+        season = self.chunk.season
+        if season is not None and season not in self.seasons:
+            print(f'[server] saved season {season!r} is not in config.json; '
+                  f'falling back to {DEFAULT_SEASON!r}')
+            season = None
+        self.current_season = season or DEFAULT_SEASON
+
+        self._phase = (self._effective_time() % self.day_night_cycle) / self.day_night_cycle
+        self._prev_is_day = self._phase < DAY_FRACTION
+        self._apply_season(self.current_season)
+
+    def _store_clock_in_chunk(self):
+        """Mirror the clock into the chunk so the next save persists it."""
+        self.chunk.cycle = self.current_cycle
+        self.chunk.season = self.current_season
+        self.chunk.day = self.current_day
+
     # ── season ────────────────────────────────────────────────────────────
     def _apply_season(self, season_name):
         self.current_season = season_name
@@ -281,43 +320,105 @@ class World:
         self.chunk.fertility = season_data['fertility']
         self._terrain_texture = f'textures/{season_data["texture"]}'
 
-    # ── creature seeding ──────────────────────────────────────────────────
+    # ── creature seeding / persistence ────────────────────────────────────
+    def _seed_creature_type(self, cdef):
+        """Random starting placement for one creature definition."""
+        positions = []
+        min_dist = cdef.get('min_spawn_distance', 2)
+        avoids = self._resolve_avoids(cdef)
+        count = cdef.get('count', 1)
+
+        for _ in range(count):
+            for _ in range(200):
+                x = random.randint(0, self.sx - 1)
+                z = random.randint(0, self.sz - 1)
+                surface = self.chunk.get_block(x, self.SY, z)
+                # Bare soil or decorative grass cover are valid spawn tiles.
+                surface_ok = surface in (GRASS, GRASS_PATCH)
+                block_ok = surface not in avoids
+                spaced = all(abs(x - rx) + abs(z - rz) >= min_dist for rx, rz in positions)
+                if surface_ok and block_ok and spaced:
+                    positions.append((x, z))
+                    break
+            else:
+                positions.append((random.randint(0, self.sx - 1), random.randint(0, self.sz - 1)))
+
+        stats = []
+        for _ in positions:
+            self._next_creature_id += 1
+            stats.append({
+                'id': self._next_creature_id,
+                'age': cdef.get('initial_age', 1),
+                'hunger': cdef.get('initial_hunger', 3),
+                'attack': cdef.get('attack', 0),
+                'sleep': 0.0,
+                'asleep': False,
+            })
+        return positions, stats
+
     def _seed_creatures(self):
         for cdef in self.creature_defs:
-            positions = []
-            min_dist = cdef.get('min_spawn_distance', 2)
-            avoids = self._resolve_avoids(cdef)
-            count = cdef.get('count', 1)
-
-            for _ in range(count):
-                for _ in range(200):
-                    x = random.randint(0, self.sx - 1)
-                    z = random.randint(0, self.sz - 1)
-                    surface = self.chunk.get_block(x, self.SY, z)
-                    # Bare soil or decorative grass cover are valid spawn tiles.
-                    surface_ok = surface in (GRASS, GRASS_PATCH)
-                    block_ok = surface not in avoids
-                    spaced = all(abs(x - rx) + abs(z - rz) >= min_dist for rx, rz in positions)
-                    if surface_ok and block_ok and spaced:
-                        positions.append((x, z))
-                        break
-                else:
-                    positions.append((random.randint(0, self.sx - 1), random.randint(0, self.sz - 1)))
-
-            stats = []
-            for _ in positions:
-                self._next_creature_id += 1
-                stats.append({
-                    'id': self._next_creature_id,
-                    'age': cdef.get('initial_age', 1),
-                    'hunger': cdef.get('initial_hunger', 3),
-                    'attack': cdef.get('attack', 0),
-                    'sleep': 0.0,
-                    'asleep': False,
-                })
-
+            positions, stats = self._seed_creature_type(cdef)
             self.all_creature_positions.append(positions)
             self.all_creature_stats.append(stats)
+
+    def _restore_creature_type(self, cdef):
+        """Rebuild one creature definition's live state from the world file."""
+        positions = []
+        stats = []
+        for inst in self.chunk.creatures.get(cdef['name'], []):
+            x = min(max(inst['x'], 0), self.sx - 1)
+            z = min(max(inst['z'], 0), self.sz - 1)
+            positions.append((x, z))
+            stats.append({
+                'id': inst['id'],
+                'age': inst.get('age', cdef.get('initial_age', 1)),
+                'hunger': inst.get('hunger', cdef.get('initial_hunger', 3)),
+                'attack': inst.get('attack', cdef.get('attack', 0)),
+                'sleep': inst.get('sleep', 0.0),
+                'asleep': inst.get('asleep', False),
+            })
+        return positions, stats
+
+    def _load_or_seed_creatures(self):
+        """Restore fauna saved in the world file; seed any definition the file
+        doesn't know about, so adding a species to entities.json doesn't
+        require regenerating the world. Returns the restored type names."""
+        self._next_creature_id = self.chunk.next_creature_id
+        restored_names = set()
+
+        for cdef in self.creature_defs:
+            if cdef['name'] in self.chunk.creatures:
+                positions, stats = self._restore_creature_type(cdef)
+                restored_names.add(cdef['name'])
+            else:
+                positions, stats = self._seed_creature_type(cdef)
+            self.all_creature_positions.append(positions)
+            self.all_creature_stats.append(stats)
+
+        return restored_names
+
+    def _store_creatures_in_chunk(self):
+        """Mirror live fauna into the chunk so the next save persists it."""
+        self.chunk.creatures = {
+            cdef['name']: [
+                {
+                    'id': st['id'], 'x': x, 'z': z,
+                    'age': st['age'], 'hunger': st['hunger'],
+                    'attack': st['attack'],
+                    'sleep': float(st.get('sleep', 0.0)),
+                    'asleep': bool(st.get('asleep', False)),
+                }
+                for (x, z), st in zip(self.all_creature_positions[ci],
+                                      self.all_creature_stats[ci])
+            ]
+            for ci, cdef in enumerate(self.creature_defs)
+        }
+        # Never write a counter below a live id, or a reload could hand out
+        # an id that is already in use.
+        highest = max((st['id'] for stats in self.all_creature_stats
+                       for st in stats), default=0)
+        self.chunk.next_creature_id = max(self._next_creature_id, highest)
 
     def _spawn_creature_at(self, ci, x, z):
         cdef = self.creature_defs[ci]
@@ -468,7 +569,7 @@ class World:
               f'hunger={st["hunger"]}')
         return True
 
-    def _find_nearest_veg(self, x, z, vdef, radius=6):
+    def _find_nearest_veg(self, x, z, vdef, radius=DEFAULT_FEED_RADIUS):
         if not vdef:
             return None
         bid = vdef['block_id']
@@ -519,7 +620,15 @@ class World:
             print(f'[feed] {cdef["name"]}#{i} ate {items} at ({x},{z}) hunger={st["hunger"]}')
         return ate
 
-    def _find_nearest_food_drop(self, x, z, cdef, radius=5):
+    @staticmethod
+    def _feed_radius(cdef):
+        """How far this creature searches for food, in Manhattan tiles."""
+        try:
+            return max(0, int(cdef.get('feed_radius', DEFAULT_FEED_RADIUS)))
+        except (TypeError, ValueError):
+            return DEFAULT_FEED_RADIUS
+
+    def _find_nearest_food_drop(self, x, z, cdef, radius=DEFAULT_FEED_RADIUS):
         edible = self._resolve_diet(cdef)
         if not edible:
             return None
@@ -536,7 +645,7 @@ class World:
                 best = (drop['x'], drop['z'])
         return best
 
-    def _find_nearest_flower(self, x, z, dead, radius=5):
+    def _find_nearest_flower(self, x, z, dead, radius=DEFAULT_FEED_RADIUS):
         if not self.flower_vdef:
             return None
         flower_bid = self.flower_vdef['block_id']
@@ -587,7 +696,7 @@ class World:
 
     def _act_feed_plants(self, ci, i, cdef, x, z, avoids, plant_defs):
         """Herbivore feed: diet order is preference (e.g. grass, then bush)."""
-        radius = int(cdef.get('feed_radius', 6))
+        radius = self._feed_radius(cdef)
         for vdef in plant_defs:
             is_cover = (self._has_tag(vdef, 'ground_cover')
                         or vdef.get('name') == 'grass')
@@ -609,6 +718,7 @@ class World:
             return self._act_feed_plants(ci, i, cdef, x, z, avoids, plant_defs)
 
         st = self.all_creature_stats[ci][i]
+        radius = self._feed_radius(cdef)
 
         if self._eat_food_at_block(x, z, ci, i, cdef):
             return (x, z)
@@ -618,17 +728,17 @@ class World:
             print(f'[feed] {cdef["name"]}#{i} attacked flower at ({x},{z})')
             return (x, z)
 
-        food_target = self._find_nearest_food_drop(x, z, cdef)
+        food_target = self._find_nearest_food_drop(x, z, cdef, radius=radius)
         if food_target:
             step = self._step_toward(x, z, food_target[0], food_target[1], avoids)
             return step if step else (x, z)
 
-        dead_target = self._find_nearest_flower(x, z, dead=True)
+        dead_target = self._find_nearest_flower(x, z, dead=True, radius=radius)
         if dead_target:
             step = self._step_toward(x, z, dead_target[0], dead_target[1], avoids)
             return step if step else (x, z)
 
-        live_target = self._find_nearest_flower(x, z, dead=False)
+        live_target = self._find_nearest_flower(x, z, dead=False, radius=radius)
         if live_target:
             step = self._step_toward(x, z, live_target[0], live_target[1], avoids)
             return step if step else (x, z)
@@ -829,7 +939,7 @@ class World:
         self._time_offset += scaled_dt - dt
 
         self._phase = (self._effective_time() % self.day_night_cycle) / self.day_night_cycle
-        is_day = self._phase < (40.0 / 60.0)
+        is_day = self._phase < DAY_FRACTION
 
         if is_day and not self._prev_is_day:
             self.current_day += 1
@@ -889,8 +999,12 @@ class World:
 
     # ── persistence ───────────────────────────────────────────────────────
     def save(self):
+        self._store_creatures_in_chunk()
+        self._store_clock_in_chunk()
         self.chunk.save(WORLD_FILE)
-        print(f'[server] saved world to {WORLD_FILE}')
+        counts = ', '.join(f'{len(self.all_creature_positions[ci])} {cdef["name"]}'
+                           for ci, cdef in enumerate(self.creature_defs))
+        print(f'[server] saved world to {WORLD_FILE}' + (f' ({counts})' if counts else ''))
 
     # ── snapshot for API clients ──────────────────────────────────────────
     def snapshot(self):
