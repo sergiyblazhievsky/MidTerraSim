@@ -2,7 +2,9 @@
   "items": [
     { "name": "seed",  "tags": ["raw", "food"], "texture": "textures/seed_16.png" },
     { "name": "berry", "tags": ["raw", "food"], "texture": "textures/berry_16.png" },
-    { "name": "meat",  "tags": ["raw", "food"], "texture": "textures/meat_16.png" },
+    { "name": "meat",    "tags": ["raw", "food"], "texture": "textures/meat_16.png" },
+    { "name": "carrot",  "tags": ["raw", "food"], "texture": "textures/carrot_16.png" },
+    { "name": "cabbage", "tags": ["raw", "food"], "texture": "textures/cabbage_16.png" },
     { "name": "log",   "tags": ["material"],    "texture": "textures/log_16.png" },
     { "name": "stick", "tags": ["material"],    "texture": "textures/stick_16.png" }
   ],
@@ -115,6 +117,36 @@
         "chance": 0.010,
         "requires_no_tree_within": 2,
         "requires_no_bush_within": 1,
+        "max_same_within": null
+      }
+    },
+    {
+      "name": "carrot",
+      "tags": ["flora", "small", "crops"],
+      "block_id": 6,
+      "initial_age": 2,
+      "age_decay_every_n_cycles": 4,
+      "contains": [],
+      "stages": [
+        { "max_age": 99, "texture": "textures/carrot_xcross_64.png", "height": 1.0, "contains": [{ "item": "carrot", "count": [1, 2] }] }
+      ],
+      "spawn": {
+        "chance": 0.040,
+        "max_same_within": null
+      }
+    },
+    {
+      "name": "cabbage",
+      "tags": ["flora", "small", "crops"],
+      "block_id": 7,
+      "initial_age": 2,
+      "age_decay_every_n_cycles": 4,
+      "contains": [],
+      "stages": [
+        { "max_age": 99, "texture": "textures/cabbage_xcross_64.png", "height": 1.0, "contains": [{ "item": "cabbage", "count": [1, 2] }] }
+      ],
+      "spawn": {
+        "chance": 0.040,
         "max_same_within": null
       }
     },

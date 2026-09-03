@@ -4,8 +4,8 @@ Handoff document for continuing work in a new chat. Last updated 2026-09-03
 (rabbits, per-season reproduction, grass as a soft under-layer, player
 fall-through fix — see [Gotchas](#gotchas) before touching player height —
 world-file persistence of fauna + the simulation clock, a data-driven
-`feed_radius`, burrows/the `home` need, and the `stock` need that fills a
-burrow's larder).
+`feed_radius`, burrows/the `home` need, the `stock` need that fills a
+burrow's larder, and carrot/cabbage crops).
 
 ---
 
@@ -90,11 +90,19 @@ with `World.snapshot()` and `make_handler()` in `server.py`.
 
 ### `entities.json` structure
 
-**Items** — seed, berry, meat tagged `raw` + `food`
+**Items** — seed, berry, meat, carrot, cabbage tagged `raw` + `food`; log and
+stick tagged `material`
 
-**Vegetation** — flower, bush, tree, grass with stages, spawn rules, per-stage loot.
-Grass uses `stage.render: "surface"` (flat tile texture over soil); other flora
-default to `"cross"` (vertical billboard).
+**Vegetation** — flower, bush, tree, carrot, cabbage, grass with stages, spawn
+rules, per-stage loot. Grass uses `stage.render: "surface"` (flat tile texture
+over soil); other flora default to `"cross"` (vertical billboard).
+
+Adding a vegetation type means touching `chunk.py` too: give it a block-id
+constant, add it to `BLOCK_NAMES`, and add its `initial_age` to
+`_DEFAULT_VEGETATION_AGE` (used to backfill ages for older save files). The
+next free block id is 8. `tests/test_entities_file.py` fails if that table and
+`entities.json` disagree, along with the other easy-to-miss data errors
+(missing texture file, loot naming an item that doesn't exist).
 
 **Creatures** — rat + rabbit with `needs: ["feed", "sleep", "home", "stock"]`.
 Rat `diet: ["food"]` (item drops + flower attacks). Rabbit
@@ -330,6 +338,8 @@ frame times spike from actual mesh building.
 28. Added [`roadmap.md`](./roadmap.md) backlog; linked from README
 29. Added the **`stock` need**: a fed, housed creature fetches one edible drop within `feed_radius`, carries it home ignoring every other need, and stashes it in the burrow's `contains`. Needs are now *ranked* (`_ranked_needs`, replacing `_pick_highest_need`) so a task with nothing to do declines its turn and the next need runs instead
 30. Fixed `_update_drops()` destroying a whole stack whenever an adjacent creature was near it, even one too full to eat anything — a hauler is always full, so this ate the feature's food before it could be carried
+31. Added **carrot** and **cabbage**: `crops`-tagged vegetation (block ids 6/7, single stage, 4% spawn, no proximity rules) dropping matching `raw`/`food` items. Tuned to `initial_age: 2` + `age_decay_every_n_cycles: 4`, which a 40k-plant Monte Carlo puts at a 10.1-cycle mean life = one season
+32. Added `tests/test_entities_file.py` — the first tests to validate the *real* `entities.json` (textures exist, loot references resolve, block ids unique and in sync with `chunk.py`, stage order, unambiguous diets)
 
 ## Session Work Log (2026-09-02)
 

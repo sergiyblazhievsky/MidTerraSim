@@ -48,14 +48,17 @@ FLOWER = 2
 BUSH   = 3
 TREE   = 4
 GRASS_PATCH = 5   # decorative grass tuft/patch grown on top of bare soil (GRASS)
+CARROT  = 6
+CABBAGE = 7
 
 BLOCK_NAMES = {
     AIR: "air", GRASS: "grass", FLOWER: "flower", BUSH: "bush", TREE: "tree",
-    GRASS_PATCH: "grass_patch",
+    GRASS_PATCH: "grass_patch", CARROT: "carrot", CABBAGE: "cabbage",
 }
 BLOCK_IDS   = {v: k for k, v in BLOCK_NAMES.items()}
 
-_DEFAULT_VEGETATION_AGE = {FLOWER: 2, BUSH: 5, TREE: 10, GRASS_PATCH: 5}
+_DEFAULT_VEGETATION_AGE = {FLOWER: 2, BUSH: 5, TREE: 10, GRASS_PATCH: 5,
+                           CARROT: 2, CABBAGE: 2}
 
 FORMAT_VERSION = 2
 

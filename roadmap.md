@@ -108,12 +108,21 @@ Currently flower/bush/tree are each a single generic type. Extend
 
 ## Crops
 
-- [ ] **Carrot, cabbage, wheat** -- new plantable/harvestable food crops,
-  likely distinct from wild flora (player- or human-planted rather than
-  randomly spawned?), feeding into the humans feature above and possibly
-  usable as creature food too. Needs new item definitions (harvested crop
-  -> food item) and probably new block/vegetation types with their own
-  grow-stage textures.
+- [x] **Carrot and cabbage** -- `crops`-tagged vegetation (block ids 6 and 7)
+  that spawns wild at 4% with no proximity rules, lives about one season
+  (`initial_age: 2`, decay every 4th cycle) and drops a matching `raw`/`food`
+  item. Rats already eat and hoard them, since their diet is the `food` tag.
+- [ ] **Wheat** -- the third crop from the original idea, still unbuilt.
+- [ ] **Grow stages for crops** -- both crops are a single stage today, so a
+  seedling looks exactly like a ripe plant. Age already counts 2 (young) then
+  1 (ripe); it only needs a second texture per crop to show it.
+- [ ] **Planting rather than wild spawn** -- crops currently seed themselves
+  anywhere like weeds. The original idea was player- or human-planted plots,
+  which is what the humans feature would want.
+- [ ] **Rabbits raiding the crops** -- the `crops` tag exists for this, but
+  the rabbit diet is still `["grass", "bush"]`. Careful: adding a tag that
+  also matches an *item* would flip rats onto the plant-feeding path
+  wholesale (see `test_no_diet_entry_matches_both_a_plant_and_an_item`).
 
 ---
 
@@ -129,6 +138,7 @@ blocks what:
 3. Generated surface (bigger change, needed before water bodies make sense)
 4. Water bodies -> fish
 5. Foxes, wolves (needs a new predator/hunt mechanic)
-6. Crops (carrot, cabbage, wheat)
+6. Crops -- carrot and cabbage are in; what's left is wheat, grow stages, and
+   planting them deliberately rather than spawning them wild
 7. Humans (largest scope, benefits from crops/water/animals already
    existing)

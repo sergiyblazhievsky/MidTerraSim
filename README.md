@@ -83,7 +83,9 @@ back up if they ever end up below the floor. See `takeover.md`'s **Gotchas**.
 
 ## Running Tests
 
-The `server.py` simulation engine (and `chunk.py`'s data model) have an automated test suite under [`tests/`](./tests). It runs entirely offline, against isolated temp-file fixtures — it never touches your real `config.json`, `entities.json`, or `chunks/chunk_0_0.wrld`.
+The `server.py` simulation engine (and `chunk.py`'s data model) have an automated test suite under [`tests/`](./tests). It runs entirely offline, against isolated temp-file fixtures — it never touches your real `config.json` or `chunks/chunk_0_0.wrld`.
+
+The one exception is [`tests/test_entities_file.py`](./tests/test_entities_file.py), which reads the *real* `entities.json` (read-only) and checks it for self-consistency: every referenced texture exists on disk, loot tables only name declared items, block ids are unique and known to `chunk.py` with matching default ages, stages are in ascending `max_age` order, and no creature diet entry is ambiguous between a plant and an item. These are the failures that otherwise surface as a brown untextured quad or a crash at the moment some plant happens to die.
 
 ```
 pip install -r requirements-dev.txt
@@ -140,10 +142,12 @@ omitted from the Vegetation section (they cover most of the map and drown out
 flowers/bushes/trees); they remain in `/state` for the UI client.
 
 ```
-▾ Vegetation (1140)
-    ▸ bush (474)
-    ▸ flower (454)
-    ▸ tree (212)
+▾ Vegetation (2924)
+    ▸ bush (465)
+    ▸ cabbage (860)
+    ▸ carrot (924)
+    ▸ flower (469)
+    ▸ tree (206)
 ▾ Structures (2)
   ▾ burrow (2)
       ▾ burrow #1
@@ -234,9 +238,9 @@ Hot-reloaded by the **server** every tick (no restart needed for `cycle_length`,
 
 Defines items, vegetation, structures, and creatures. Loaded independently by **both** `server.py` (authoritative rules) and `main.py` (rendering/texture lookups) — unchanged from before.
 
-**Items** — `name`, `tags` (e.g. `raw`, `food` for seed/berry/meat)
+**Items** — `name`, `tags` (e.g. `raw`, `food` for seed/berry/meat/carrot/cabbage)
 
-**Vegetation** — `tags`, `block_id`, `stages[]` (texture, optional `render`/`height`/`width`, per-stage loot), `spawn` rules. Stage `render` defaults to `"cross"` (vertical billboard); `"surface"` lays a flat texture on the tile top (used by grass).
+**Vegetation** — `tags`, `block_id`, `initial_age`, `age_decay_every_n_cycles`, `stages[]` (texture, optional `render`/`height`/`width`, per-stage loot), `spawn` rules. Stage `render` defaults to `"cross"` (vertical billboard); `"surface"` lays a flat texture on the tile top (used by grass). `block_id` must also be listed in `chunk.py` (`BLOCK_NAMES` and the default-age table used when backfilling older save files).
 
 **Structures** — things creatures build. `texture`, `render` (`"surface"`),
 `initial_age` (how many seasonal hits it can take), `break_chance` (per-season
@@ -271,21 +275,29 @@ matched by `type` the same way; a structure whose type no longer exists in
 
 #### Spawn priority (runtime)
 
-On each eligible tile, flora are tried in file order: **flower → bush → tree → grass**. First successful roll wins.
+On each eligible tile, flora are tried in file order: **flower → bush → tree → carrot → cabbage → grass**. First successful roll wins.
 
 Eligible tiles:
 
-- **Flower / bush / tree** — bare soil **or** a grass patch (ground cover is a soft under-layer; a plant may claim and replace it)
+- **Flower / bush / tree / crops** — bare soil **or** a grass patch (ground cover is a soft under-layer; a plant may claim and replace it)
 - **Grass** — bare soil only (will not stack on an existing grass patch)
 
-Flower/bush/tree never treat grass as an occupying blocker. Grass also has no proximity rules against other flora.
+Only grass is a soft under-layer; every other plant blocks the tile against the rest. Grass has no proximity rules against other flora.
 
 | Plant | Chance | Constraints |
 |-------|--------|-------------|
 | Flower | 9% | Max 1 neighbor flower within radius 1 |
 | Bush | 3% | No tree/bush within radius 1 |
 | Tree | 1% | No tree within radius 2, no bush within radius 1 |
+| Carrot | 4% | None — crops may grow shoulder to shoulder |
+| Cabbage | 4% | None — crops may grow shoulder to shoulder |
 | Grass | 15% | Only during `active_seasons` (spring, summer) — no proximity constraints |
+
+An unconstrained 4% is dense: measured over 30 cycles on a 100×100 map, the
+two crops settle around 900 tiles each (~18% of the map between them), mostly
+colonizing bare soil — the other flora lose about 10–14% of their standing
+count to the competition. Give them a `max_same_within` (as flower has) to
+thin them into patches rather than fields.
 
 All spawns also require a fertility roll (`random 0–100 ≤ chunk.fertility`). A
 vegetation entry's `spawn.active_seasons` (optional, e.g. `["spring", "summer"]`)
@@ -299,6 +311,35 @@ Grass itself is decorative ground cover rendered as a flat surface texture
 on bare soil (and never blocks flower/bush/tree from claiming a grassy tile).
 It decays like any other `flora`-tagged vegetation (moisture-driven).
 
+#### Crops, and how long a plant lives
+
+Carrot and cabbage are `crops`-tagged flora: a single stage, no proximity
+rules, and one item — a carrot or a cabbage — dropped when the plant dies.
+Both are `raw`/`food` items, which puts them straight on the rat's menu (its
+diet is the `food` tag), so rats will eat them off the ground and haul them
+into their burrows.
+
+Lifetime is the product of two numbers rather than a duration. Every cycle a
+plant whose `current_cycle % age_decay_every_n_cycles == 0` rolls against
+moisture and loses 1 age on success; at age `0` it dies and drops its loot.
+So the expected life is roughly `initial_age × age_decay_every_n_cycles ÷ P`,
+where `P` (about 0.7 at the seasonal average moisture) is the chance of any
+one roll landing. Measured over 40,000 simulated plants, with `season_length`
+at 10 cycles:
+
+| Plant | `initial_age` | decay every | Mean life | In seasons |
+|-------|---------------|-------------|-----------|------------|
+| Flower | 2 | 1 cycle | ~2.6 cycles | ~0.3 |
+| Carrot / cabbage | 2 | 4 cycles | ~10.1 cycles | ~1.0 |
+| Bush | 5 | 2 cycles | ~14 cycles | ~1.4 |
+| Grass | 5 | 3 cycles | ~21 cycles | ~2.1 |
+| Tree | 10 | 2 cycles | ~29 cycles | ~2.9 |
+
+The spread is wide, which is the point: crops have a 10th percentile of ~5
+cycles and a 90th of ~16, so a field sown together doesn't come up all at
+once. Note that a low `age` means *old* — age counts **down** from
+`initial_age`, so a crop is young at 2 and ripe at 1.
+
 #### Stage-based loot (on death)
 
 | Plant | Stage | Drops |
@@ -311,6 +352,8 @@ It decays like any other `flora`-tagged vegetation (moisture-driven).
 | Tree | Small (age 9+) | 3–4 sticks |
 | Tree | Normal/medium | 2–4 logs, 4–6 sticks |
 | Tree | Dead (age ≤ 1) | 3–5 logs, 5–7 sticks |
+| Carrot | any (single stage) | 1–2 carrots |
+| Cabbage | any (single stage) | 1–2 cabbages |
 | Grass | — | none |
 | Rat | — | 1 meat |
 | Rabbit | — | 2–3 meat |
@@ -328,7 +371,7 @@ Each simulation cycle (`cycle_length` seconds):
 
 When hungry (`feed` need = `initial_hunger - hunger`):
 
-1. Eat food drops on same tile (seed, berry, meat — resolved via `food` tag)
+1. Eat food drops on same tile (seed, berry, meat, carrot, cabbage — resolved via `food` tag)
 2. Attack flower on same tile (reduce age by `attack`)
 3. Move toward nearest food drop within `feed_radius` (5 for rats)
 4. Move toward nearest dead flower, then live flower — same `feed_radius`
@@ -414,7 +457,7 @@ MidTerraSim/
 ├── SERVER_CLIENT_API.md  # Full HTTP/JSON API contract for building your own client
 ├── takeover.md        # Session handoff notes for continuing development
 ├── roadmap.md         # Planned future work / backlog
-├── tests/             # Automated test suite for server.py + chunk.py
+├── tests/             # Automated test suite for server.py + chunk.py, plus entities.json validation
 ├── pytest.ini         # pytest discovery configuration
 ├── requirements-dev.txt  # Test-only dependencies (pytest, pytest-cov)
 ├── chunks/            # Saved world state (.wrld)
