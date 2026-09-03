@@ -156,10 +156,10 @@ Hot-reloaded by the **server** every tick (no restart needed for `cycle_length`,
   "day_night_cycle": 60.0,
   "drop_lifetime": 60.0,
   "seasons": {
-    "spring": { "moisture": 40, "fertility": 20, "texture": "grass.png" },
-    "summer": { "moisture": 20, "fertility": 30, "texture": "grass.png" },
-    "fall":   { "moisture": 30, "fertility": 40, "texture": "grass_fall.png" },
-    "winter": { "moisture": 30, "fertility": 10, "texture": "grass_winter.png" }
+    "spring": { "moisture": 40, "fertility": 20, "texture": "soil.png" },
+    "summer": { "moisture": 20, "fertility": 30, "texture": "soil.png" },
+    "fall":   { "moisture": 30, "fertility": 40, "texture": "soil_fall.png" },
+    "winter": { "moisture": 30, "fertility": 10, "texture": "soil_winter.png" }
   },
   "server": {
     "host": "127.0.0.1",

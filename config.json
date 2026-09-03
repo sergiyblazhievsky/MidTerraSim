@@ -7,22 +7,22 @@
     "spring": {
       "moisture": 40,
       "fertility": 20,
-      "texture": "grass.png"
+      "texture": "soil.png"
     },
     "summer": {
       "moisture": 20,
       "fertility": 30,
-      "texture": "grass.png"
+      "texture": "soil.png"
     },
     "fall": {
       "moisture": 30,
       "fertility": 40,
-      "texture": "grass_fall.png"
+      "texture": "soil_fall.png"
     },
     "winter": {
       "moisture": 30,
       "fertility": 10,
-      "texture": "grass_winter.png"
+      "texture": "soil_winter.png"
     }
   },
   "server": {

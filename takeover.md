@@ -97,7 +97,7 @@ for the full day/night and lifecycle rules.
 
 Priority order: flower → bush → tree (first win per tile).
 
-Global gate: bare grass + fertility roll + not already changing.
+Global gate: bare ground + fertility roll + not already changing.
 
 | Plant | Chance | Key constraints |
 |-------|--------|-----------------|

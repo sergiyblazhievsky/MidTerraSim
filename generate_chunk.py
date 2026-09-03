@@ -1,5 +1,5 @@
 """
-Run once to generate the initial 100×100×100 grass chunk with random flowers.
+Run once to generate the initial 100×100×100 soil chunk with random flowers.
 Re-run any time you want to reset the world.
 """
 import os
@@ -10,44 +10,63 @@ from chunk import Chunk, AIR, GRASS, FLOWER, BUSH, TREE
 # ── textures ──────────────────────────────────────────────────────────────────
 os.makedirs("textures", exist_ok=True)
 
-# grass — noisy green (spring/summer)
+# soil — noisy brown earth/mud, the default bare-ground look (spring/summer)
 random.seed(42)
-grass_img = Image.new("RGB", (16, 16))
+soil_img = Image.new("RGB", (16, 16))
 for py in range(16):
     for px in range(16):
-        grass_img.putpixel((px, py), (
-            random.randint(65,  95),
-            random.randint(115, 155),
-            random.randint(40,  70),
+        soil_img.putpixel((px, py), (
+            random.randint(90, 130),
+            random.randint(60, 90),
+            random.randint(35, 55),
         ))
-grass_img.save("textures/grass.png")
-print("Saved textures/grass.png")
+# scatter a few darker clod/pebble speckles for texture
+for _ in range(18):
+    px, py = random.randint(0, 15), random.randint(0, 15)
+    shade = random.randint(-30, -10)
+    r, g, b = soil_img.getpixel((px, py))
+    soil_img.putpixel((px, py), (max(0, r + shade), max(0, g + shade), max(0, b + shade)))
+soil_img.save("textures/soil.png")
+print("Saved textures/soil.png")
 
-# grass — yellowish fall
+# soil — darker, wetter reddish-brown (fall)
 random.seed(43)
-fall_img = Image.new("RGB", (16, 16))
+soil_fall_img = Image.new("RGB", (16, 16))
 for py in range(16):
     for px in range(16):
-        fall_img.putpixel((px, py), (
-            random.randint(155, 210),
-            random.randint(138, 180),
-            random.randint(55,  95),
+        soil_fall_img.putpixel((px, py), (
+            random.randint(75, 105),
+            random.randint(45, 65),
+            random.randint(30, 45),
         ))
-fall_img.save("textures/grass_fall.png")
-print("Saved textures/grass_fall.png")
+for _ in range(18):
+    px, py = random.randint(0, 15), random.randint(0, 15)
+    shade = random.randint(-25, -8)
+    r, g, b = soil_fall_img.getpixel((px, py))
+    soil_fall_img.putpixel((px, py), (max(0, r + shade), max(0, g + shade), max(0, b + shade)))
+soil_fall_img.save("textures/soil_fall.png")
+print("Saved textures/soil_fall.png")
 
-# grass — pale winter
+# soil — pale, frost-dusted ground (winter)
 random.seed(44)
-winter_img = Image.new("RGB", (16, 16))
+soil_winter_img = Image.new("RGB", (16, 16))
 for py in range(16):
     for px in range(16):
-        winter_img.putpixel((px, py), (
-            random.randint(210, 245),
-            random.randint(220, 245),
-            random.randint(220, 245),
+        soil_winter_img.putpixel((px, py), (
+            random.randint(140, 165),
+            random.randint(125, 148),
+            random.randint(110, 130),
         ))
-winter_img.save("textures/grass_winter.png")
-print("Saved textures/grass_winter.png")
+# light frost/snow speckles
+for _ in range(20):
+    px, py = random.randint(0, 15), random.randint(0, 15)
+    soil_winter_img.putpixel((px, py), (
+        random.randint(215, 240),
+        random.randint(215, 240),
+        random.randint(220, 245),
+    ))
+soil_winter_img.save("textures/soil_winter.png")
+print("Saved textures/soil_winter.png")
 
 # flower — red petals + yellow centre on transparent background
 flower_img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))

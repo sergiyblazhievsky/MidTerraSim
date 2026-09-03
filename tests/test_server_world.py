@@ -230,7 +230,7 @@ def test_apply_season_updates_chunk_and_texture(world):
     assert world.current_season == "winter"
     assert world.chunk.moisture == 30
     assert world.chunk.fertility == 10
-    assert world._terrain_texture == "textures/grass_winter.png"
+    assert world._terrain_texture == "textures/soil_winter.png"
 
 
 # ── tag / diet / avoidance resolution ────────────────────────────────────────

@@ -153,9 +153,10 @@ def _add_top_quad(vl, tl, ul, x, y, z):
 
 def build_ground_mesh(sx, sz, sy):
     """Flat ground plane at the world's surface level (constant `sy`). The
-    current world generator always fills the full column height with grass,
-    so the topmost block is always at `sy` — this mirrors that assumption
-    without needing per-column height data from the server."""
+    current world generator always fills the full column height with the
+    default ground block (soil), so the topmost block is always at `sy` —
+    this mirrors that assumption without needing per-column height data
+    from the server."""
     gv, gt, gu = [], [], []
     for x in range(sx):
         for z in range(sz):
