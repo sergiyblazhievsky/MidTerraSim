@@ -341,7 +341,7 @@ vegetation exists, not to world size.
 | Field | Type | Semantics |
 |-------|------|-----------|
 | `id` | int | **Stable, per-instance identifier**, assigned once at spawn/birth and never reused or renumbered. It is *not* an array index — safe to use as a dictionary/map key across polls to add/update/remove individual entities instead of rebuilding the whole list. IDs are monotonically increasing per server session and reset to start again from `1` only on server restart. |
-| `type` | string | Creature definition name from [`entities.json`](./entities.json) (currently only `"rat"`) — look this up in `entities.json`'s `creatures[]` to get texture/behavior metadata (see §9) |
+| `type` | string | Creature definition name from [`entities.json`](./entities.json) (e.g. `"rat"`, `"rabbit"`) — look this up in `entities.json`'s `creatures[]` to get texture/behavior metadata (see §9) |
 | `x`, `z` | int | Current tile position (`y` is always `chunk.surface_y + y_offset` from the creature's definition, entirely a client-side rendering concern) |
 | `age` | int | Remaining lifespan in "age units"; decremented once per day once `hunger` is `0`, or once per winter start; creature is removed when `age <= 0` |
 | `hunger` | int | Current hunger/satiation counter, `0`..`initial_hunger` (from `entities.json`); decreases food need, increases (up to the cap) when eating |
@@ -350,7 +350,7 @@ vegetation exists, not to world size.
 | `needs` | object | The server's **currently computed** need→priority map for this instance (same values `_creature_move` uses to decide behavior this tick), keyed by whichever needs are listed in the creature's `entities.json` definition (e.g. `{"feed": 1, "sleep": 0.5}`). `feed` is `max(0, initial_hunger - hunger)`; `sleep` mirrors the `sleep` field but reads as `0` while `asleep` is `true`. A creature with no configured needs reports `{}`. This is derived/informational — you don't need it to render the world, only to inspect *why* a creature is behaving a certain way (see the `/` inspector page, §4a). |
 
 Creatures never appear/disappear mid-array-shuffle — entries are only added
-(birth in summer) or removed (death from starvation/old age/winter) between
+(birth on each season change) or removed (death from starvation/old age/winter) between
 snapshots; existing IDs' fields update in place.
 
 ### `drops[]` — one entry per item drop currently on the ground
@@ -600,15 +600,21 @@ floating/bobbing effect without needing faster polling:
 
 ```python
 age = drop_age_from_last_snapshot + (time.time() - received_at)
-y_offset = base_height + amplitude * sin(age * speed)
+# Billboard quads are centered on their position — place the center high
+# enough that the whole icon clears the visual ground (surface_y+0.5) and
+# any grass surface decal (surface_y+0.51).
+drop_scale = 0.5
+hover = 0.2
+y = surface_y + 0.5 + (drop_scale / 2) + hover + 0.08 * sin(age * 2.0)
 ```
 
-Recommended starting constants (from `main.py`): amplitude `0.08`, speed
-`2.0`, base height `surface_y + 0.52`. Give each drop a small random
-per-instance `(x, z)` jitter the first time you see its `id` (purely
-cosmetic, so newly-adjacent drops don't render perfectly overlapping) and
-keep reusing that same jitter for the drop's lifetime — don't re-roll it
-every poll.
+Recommended starting constants (from `main.py`): scale `0.5`, hover `0.2`
+above the surface, bob amplitude `0.08`, speed `2.0`. A base of
+`surface_y + 0.52` with a centered 0.4-tall quad buries half the icon
+under the ground — avoid that. Give each drop a small random per-instance
+`(x, z)` jitter the first time you see its `id` (purely cosmetic, so
+newly-adjacent drops don't render perfectly overlapping) and keep reusing
+that same jitter for the drop's lifetime — don't re-roll it every poll.
 
 ---
 

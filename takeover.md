@@ -1,7 +1,8 @@
 # MidTerraSim — Session Takeover
 
 Handoff document for continuing work in a new chat. Last updated 2026-09-03
-(grass surface rendering, inspector grass filter, client eye height).
+(rabbits, per-season reproduction, grass as a soft under-layer, player
+fall-through fix — see [Gotchas](#gotchas) before touching player height).
 
 ---
 
@@ -56,7 +57,10 @@ with `World.snapshot()` and `make_handler()` in `server.py`.
 Grass uses `stage.render: "surface"` (flat tile texture over soil); other flora
 default to `"cross"` (vertical billboard).
 
-**Creatures** — rat with `needs: ["feed", "sleep"]`, `diet: ["food"]`
+**Creatures** — rat + rabbit with `needs: ["feed", "sleep"]`. Rat
+`diet: ["food"]` (item drops + flower attacks). Rabbit
+`diet: ["grass", "bush"]` (eat grass cover, else browse bushes within
+`feed_radius`).
 
 Block IDs: `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRASS_PATCH=5`
 
@@ -147,6 +151,48 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 
 ---
 
+## Gotchas
+
+### Player fall-through: the floor collider must stay thick
+
+**Symptom:** you spawn and fall forever through the ground into the void, with
+no error in either console. Has been hit twice now.
+
+**Cause:** Ursina's `FirstPersonController` moves a falling player by
+`air_time * time.dt * 100` per frame, so the step size scales with frame time.
+The frame that runs `_build_world()` (10,000-quad ground mesh) plus the first
+`_rebuild_vegetation()` (thousands of quads) takes on the order of a second, so
+the next frame's `time.dt` is huge and one gravity step can travel more than a
+block. That skips a thin floor collider entirely — and once the player is
+underneath it, the downward raycast hits nothing, `ray.distance` is `inf`, and
+they fall forever. Nothing logs, because nothing actually failed.
+
+**Guards in `main.py` — keep all three:**
+
+1. `FLOOR_THICKNESS = 20` — the walkable slab is thick enough that no single
+   gravity step can pass through it. Only its **top** face matters visually;
+   it's positioned at `floor_top(SY) - FLOOR_THICKNESS / 2`. The placeholder
+   `_temp_floor` uses the same thickness.
+2. `_build_world()` spawns the player with feet already **on** the floor
+   (`player.position = (sx / 2, floor_top(SY), sz / 2)`, `air_time = 0`)
+   instead of dropping them onto it — no free fall during the slow frame.
+3. `update()` snaps the player back to `floor_top(SY)` if they ever end up more
+   than a unit below it.
+
+**Height model** — one source of truth, don't reintroduce half-unit offsets:
+
+| Thing | Y |
+|-------|---|
+| Visual ground / plant bases / grass decal | `surface_top(SY)` = `SY + 0.5` |
+| Walkable floor top (player feet) | `floor_top(SY)` = `SY + 0.6` |
+| Camera / eyes | feet + `PLAYER_EYE_HEIGHT` (2) = `SY + 2.6` |
+
+Debugging this needs the **real client against a live server** — the geometry
+grounds fine in an isolated Ursina scene, because the bug only appears once
+frame times spike from actual mesh building.
+
+---
+
 ## Texture Assets
 
 - **16×16** — ground tiles (`soil*.png`, `grass.png` surface cover), drop icons (`*_16.png`)
@@ -174,8 +220,14 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 14. Added decorative grass vegetation (`GRASS_PATCH=5`, season-gated spawn, world-gen fills bare soil)
 15. Inspector Vegetation section filters out `type === 'grass'` (display-only; still in `/state`)
 16. Grass rendering switched from cross-billboard to surface decal: `stage.render: "surface"` + `textures/grass.png`, `build_surface_veg_mesh` in `main.py`; removed `grass_xcross_64.png`
-17. Client eye height pinned to `PLAYER_EYE_HEIGHT = 2.0` (camera_pivot re-asserted on world build); walkable floor remains the solid centered cube (thin `origin_y` slab caused fall-through)
-18. Added [`roadmap.md`](./roadmap.md) backlog; linked from README
+17. Client eye height pinned to `PLAYER_EYE_HEIGHT = 2.0` (camera_pivot re-asserted on world build); walkable floor top at `floor_top(SY) = SY + 0.6`
+18. Drops raised to `_drop_center_y()` so the whole billboard clears the ground and grass decal (previously half-buried at `SY + 0.52`)
+19. Vegetation stage heights fixed to flower 1 / bush 2 / tree 4 — the `max_age: 99` stages (used by *fresh* plants, since age counts down) were still set to height 1
+20. Fauna now reproduce on **every** season change, not just summer; winter still ages first so only survivors breed
+21. Added the **rabbit**: herbivore with `diet: ["grass", "bush"]` — eats grass cover off its tile, else seeks grass within `feed_radius`, else browses bushes (age −`attack`); drops 2–3 meat
+22. Runtime grass no longer blocks other flora — `ground_cover`-tagged vegetation is a soft under-layer, so flower/bush/tree can claim a grassy tile
+23. Fixed endless player fall-through (thick floor collider + on-floor spawn + recovery guard) — see [Gotchas](#gotchas)
+24. Added [`roadmap.md`](./roadmap.md) backlog; linked from README
 
 ## Session Work Log (2026-09-02)
 
@@ -192,9 +244,9 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 
 ## Likely Next Steps
 
-- Fix drop display bug (see [`roadmap.md`](./roadmap.md))
 - Extend `needs` beyond `feed`/`sleep` (thirst, shelter, etc.)
-- Generalize feed attack beyond flowers (bushes? trees?)
+- Predators (fox/wolf) — needs a new "hunt" behavior; the plant-diet path
+  (`_act_feed_plants`) is the closest existing template
 - Align `generate_chunk.py` initial spawn order with runtime (flower first vs last)
 - `map_viewer.py` — show bushes/trees/grass, not just flowers
 - Flora variety / new fauna / generated heightmap — see roadmap
@@ -202,7 +254,10 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 
 ---
 
-## Quick Reference: Rat Config
+## Quick Reference: Creature Configs
+
+`diet` drives *which* feed AI runs: item names/tags → drops + flower attacks
+(`_act_feed`); vegetation names/tags → grazing/browsing (`_act_feed_plants`).
 
 ```json
 {
@@ -214,5 +269,21 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
   "sleep_gain": 0.5,
   "avoids_block_tag": "tree",
   "reproduce_count": [1, 6]
+}
+```
+
+```json
+{
+  "name": "rabbit",
+  "needs": ["feed", "sleep"],
+  "diet": ["grass", "bush"],
+  "feed_radius": 6,
+  "initial_hunger": 5,
+  "initial_age": 3,
+  "attack": 1,
+  "sleep_gain": 0.5,
+  "avoids_block_tag": "tree",
+  "reproduce_count": [2, 3],
+  "contains": [{ "item": "meat", "count": [2, 3] }]
 }
 ```

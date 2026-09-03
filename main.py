@@ -71,6 +71,7 @@ creature_defs_by_name = {c['name']: c for c in entities_cfg.get('creatures', [])
 item_texture_paths = {name: idef.get('texture') for name, idef in item_defs.items() if idef.get('texture')}
 
 ITEM_TEXTURES = {
+    'seed':  'textures/seed_16.png',
     'berry': 'textures/berry_16.png',
     'log':   'textures/log_16.png',
     'stick': 'textures/stick_16.png',
@@ -83,6 +84,10 @@ ITEM_COLORS = {
     'stick': color.rgb(0.6, 0.4, 0.2),
     'meat':  color.red,
 }
+# Billboard quads are centered on their position; keep the whole icon above
+# the visual ground (SY+0.5) and the grass surface decal (SY+0.51).
+DROP_SCALE = 0.5
+DROP_HOVER = 0.2  # clearance above the surface before bobbing
 
 
 def _get_stage(vdef, age):
@@ -143,10 +148,33 @@ class ServerClient:
 
 
 # ── mesh helpers ────────────────────────────────────────────────────────────
+# Block at integer Y has its top face at Y+0.5 (Ursina/Minecraft-style).
+# SY from the server is that integer block Y; every ground-relative visual
+# (terrain top, vegetation base, grass decal, drops, player feet) must use
+# SURFACE_TOP = SY+0.5 so nothing is half a unit low/high relative to the rest.
+def surface_top(sy):
+    return sy + 0.5
+
+
+# Walkable height: a hair above the visual ground so the player never clips
+# into it. Feet rest here, camera sits PLAYER_EYE_HEIGHT above that.
+def floor_top(sy):
+    return surface_top(sy) + 0.1
+
+
+# The floor collider is deliberately thick. FirstPersonController's gravity
+# moves the player by `air_time * dt * 100` per frame, so a single long frame
+# (the one that builds the ground/vegetation meshes can take a second or more)
+# steps far enough to skip a thin slab entirely — the raycast then finds
+# nothing below and the player falls forever.
+FLOOR_THICKNESS = 20.0
+
+
 def _add_top_quad(vl, tl, ul, x, y, z):
     base = len(vl)
-    vl += [(x-0.5, y+0.5, z-0.5), (x+0.5, y+0.5, z-0.5),
-           (x+0.5, y+0.5, z+0.5), (x-0.5, y+0.5, z+0.5)]
+    top = surface_top(y)
+    vl += [(x-0.5, top, z-0.5), (x+0.5, top, z-0.5),
+           (x+0.5, top, z+0.5), (x-0.5, top, z+0.5)]
     tl += [base, base+1, base+2, base, base+2, base+3]
     ul += [(0,0),(1,0),(1,1),(0,1)]
 
@@ -166,8 +194,10 @@ def build_ground_mesh(sx, sz, sy):
 
 def build_veg_mesh(entries, sy):
     """Cross-quad mesh for a list of {'x','z','height','width'} vegetation
-    entries that all share one (block_id, stage) — one Entity per such group."""
+    entries that all share one (block_id, stage) — one Entity per such group.
+    Bases sit on the block top (sy+0.5); `height`/`width` are full extents."""
     verts, tris, uvs = [], [], []
+    base_y = surface_top(sy)
     for e in entries:
         x, z, h = e['x'], e['z'], e['height']
         half_w = e.get('width', 1.0) / 2.0
@@ -177,10 +207,10 @@ def build_veg_mesh(entries, sy):
         ]:
             base = len(verts)
             verts += [
-                (x+dx0, sy+0.5,   z+dz0),
-                (x+dx1, sy+0.5,   z+dz1),
-                (x+dx1, sy+0.5+h, z+dz1),
-                (x+dx0, sy+0.5+h, z+dz0),
+                (x+dx0, base_y,     z+dz0),
+                (x+dx1, base_y,     z+dz1),
+                (x+dx1, base_y + h, z+dz1),
+                (x+dx0, base_y + h, z+dz0),
             ]
             tris += [base, base+1, base+2, base, base+2, base+3]
             tris += [base+2, base+1, base, base+3, base+2, base]
@@ -194,7 +224,7 @@ def build_surface_veg_mesh(entries, sy):
     block rather than a vertical plant billboard."""
     verts, tris, uvs = [], [], []
     # Slightly above the soil top face to avoid z-fighting with the ground mesh.
-    y = sy + 0.5 + 0.01
+    y = surface_top(sy) + 0.01
     for e in entries:
         x, z = e['x'], e['z']
         base = len(verts)
@@ -225,11 +255,10 @@ sky = Sky(color=color.rgb(0.7, 0.8, 1.0))
 ambient_light = AmbientLight(color=color.white, strength=1.0)
 
 # placeholder ground so the player doesn't fall while we wait to connect
-_temp_floor = Entity(model='cube', scale=(1000, 1, 1000), position=(0, -0.5, 0),
+_temp_floor = Entity(model='cube', scale=(1000, FLOOR_THICKNESS, 1000),
+                      position=(0, -FLOOR_THICKNESS / 2, 0),
                       collider='box', visible=False)
-# Eye height above the controller's feet (which sit on the ground collider).
-# Ursina's FirstPersonController only applies this to camera_pivot at init,
-# so we also re-assert camera_pivot.y after world build.
+# Camera sits this many units above the feet — same as normal bush height.
 PLAYER_EYE_HEIGHT = 2.0
 player = FirstPersonController(position=(0, 2, 0), height=PLAYER_EYE_HEIGHT)
 player.camera_pivot.y = PLAYER_EYE_HEIGHT
@@ -329,21 +358,25 @@ def _build_world(snap):
             ent.setTransparency(1)
             veg_entities[(bid, si)] = ent
 
-    # Solid walkable collider: default cube is centered, so position.y=SY with
-    # scale_y=1 puts the top face at SY+0.5 — flush with the visual ground mesh.
+    # Walkable collider. The cube model is centered, so offset it down by half
+    # its thickness to put the top face exactly at floor_top(SY) = SY+0.6 (just
+    # above the visual ground at SY+0.5). Camera is PLAYER_EYE_HEIGHT (2) above
+    # the feet, matching normal bush height.
+    top = floor_top(SY)
     floor = Entity(
         model='cube',
-        scale=(sx, 1, sz),
-        position=(sx / 2 - 0.5, SY, sz / 2 - 0.5),
+        scale=(sx, FLOOR_THICKNESS, sz),
+        position=(sx / 2 - 0.5, top - FLOOR_THICKNESS / 2, sz / 2 - 0.5),
         collider='box',
         visible=False,
     )
 
     player.height = PLAYER_EYE_HEIGHT
     player.camera_pivot.y = PLAYER_EYE_HEIGHT
-    # Spawn above the surface; FirstPersonController gravity will settle
-    # the feet onto the floor top (SY+0.5).
-    player.position = (sx / 2, SY + 0.5 + PLAYER_EYE_HEIGHT, sz / 2)
+    # Place the feet directly on the floor rather than dropping onto it — the
+    # mesh-building frame is slow enough that a free fall can tunnel through.
+    player.position = (sx / 2, top, sz / 2)
+    player.air_time = 0
     print(f'[client] world built ({sx}x{sz}, surface_y={SY}).')
 
 
@@ -374,15 +407,23 @@ def _rebuild_vegetation(vegetation_list):
             ent.model = build_veg_mesh(entries, SY)
 
 
+def _drop_center_y(age=0.0):
+    """World Y for a drop billboard center: fully above the ground/grass,
+    plus a gentle bob."""
+    return surface_top(SY) + (DROP_SCALE / 2.0) + DROP_HOVER + 0.08 * sin(age * 2.0)
+
+
 def _create_drop_entity(item):
     tex_path = item_texture_paths.get(item) or ITEM_TEXTURES.get(item)
     if tex_path:
-        ent = Entity(model='quad', texture=load_texture(tex_path), scale=(0.4, 0.4),
+        ent = Entity(model='quad', texture=load_texture(tex_path),
+                     scale=(DROP_SCALE, DROP_SCALE),
                      billboard=True, double_sided=True, collider=None)
         ent.setTransparency(1)
     else:
         col = ITEM_COLORS.get(item, color.white)
-        ent = Entity(model='quad', color=col, scale=(0.35, 0.35), billboard=True, collider=None)
+        ent = Entity(model='quad', color=col, scale=(DROP_SCALE * 0.9, DROP_SCALE * 0.9),
+                     billboard=True, collider=None)
     return ent
 
 
@@ -423,8 +464,12 @@ def _sync_drops(drops_list):
         did = d['id']
         seen.add(did)
         if did not in drop_entities:
-            drop_entities[did] = _create_drop_entity(d['item'])
-            drop_base_xz[did] = (d['x'] + random.uniform(-0.3, 0.3), d['z'] + random.uniform(-0.3, 0.3))
+            ent = _create_drop_entity(d['item'])
+            bx = d['x'] + random.uniform(-0.3, 0.3)
+            bz = d['z'] + random.uniform(-0.3, 0.3)
+            drop_entities[did] = ent
+            drop_base_xz[did] = (bx, bz)
+            ent.position = (bx, _drop_center_y(d.get('age', 0.0)), bz)
         drop_ages[did] = d['age']
 
     for did in list(drop_entities.keys()):
@@ -496,7 +541,7 @@ def _update_lighting_and_bob(snap, received_at):
         bx, bz = drop_base_xz[did]
         ent.x = bx
         ent.z = bz
-        ent.y = SY + 0.52 + 0.08 * sin(age * 2.0)
+        ent.y = _drop_center_y(age)
 
     status_text.text = (
         f'{t["season"].title()} | Cycle {t["cycle"]} | Day {t["day"]}\n'
@@ -552,6 +597,12 @@ def update():
     if world_built:
         player.x = min(max(player.x, 0.5), sx - 1.5)
         player.z = min(max(player.z, 0.5), sz - 1.5)
+        # Safety net for the tunnelling described at FLOOR_THICKNESS: if a
+        # frame ever drops the player below the floor, put them back on it.
+        top = floor_top(SY)
+        if player.y < top - 1.0:
+            player.y = top
+            player.air_time = 0
 
 
 def _parse_args():

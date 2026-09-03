@@ -11,11 +11,11 @@ Status legend: unstarted / in-progress / done (moved to README/takeover)
 
 ## Bugs
 
-- [ ] **Fix drop display** -- item drops (seed/berry/meat/log/stick) aren't
-  rendering/behaving correctly on the client; needs investigation (could be
-  texture lookup, positioning/jitter, bobbing animation, or stale entities
-  not being cleaned up -- check `_sync_drops`/`_create_drop_entity` in
-  `main.py` against the server's `drops[]` snapshot).
+- [x] **Fix drop display** -- drops were centered at `surface_y + 0.52` with
+  a 0.4-tall billboard, so half the icon sat under the ground/grass.
+  Client now places the billboard center at
+  `surface_y + 0.5 + scale/2 + hover` (`DROP_SCALE=0.5`, `DROP_HOVER=0.2`)
+  so the full icon floats above the surface.
 
 ## Rendering & Terrain
 
@@ -48,8 +48,9 @@ All of these plug into the existing generic creature system in
 `takeover.md`'s "Creature needs / feed + sleep AI" section for the pattern
 established by rats.
 
-- [ ] **Rabbits** -- likely herbivore, similar to rats but perhaps
-  faster/more skittish, eats plants/crops.
+- [x] **Rabbits** -- herbivore; eats grass cover then browses bushes;
+  same needs/sleep/movement pattern as rats (`entities.json` + plant diet
+  feed AI).
 - [ ] **Foxes** -- predator; would need a new "hunt" need/behavior
   (attacking rabbits/rats rather than flowers), since the current feed AI
   only attacks flowers. First carnivore in the ecosystem.
@@ -99,14 +100,13 @@ Currently flower/bush/tree are each a single generic type. Extend
 Not a commitment, just a reasonable dependency-aware sequence based on what
 blocks what:
 
-1. Fix drop display (bug -- small, isolated, unblocks trust in the drop
-   system)
-2. Flora variety (flowers/bushes/trees) -- extends existing systems, no new
+1. Flora variety (flowers/bushes/trees) -- extends existing systems, no new
    mechanics needed
-3. Rabbits, birds (simple new fauna, reuse existing herbivore/feed patterns)
-4. Generated surface (bigger change, needed before water bodies make sense)
-5. Water bodies -> fish
-6. Foxes, wolves (needs a new predator/hunt mechanic)
-7. Crops (carrot, cabbage, wheat)
-8. Humans (largest scope, benefits from crops/water/animals already
+2. Birds (simple new fauna, reuse the existing herbivore/feed patterns that
+   rabbits now establish)
+3. Generated surface (bigger change, needed before water bodies make sense)
+4. Water bodies -> fish
+5. Foxes, wolves (needs a new predator/hunt mechanic)
+6. Crops (carrot, cabbage, wheat)
+7. Humans (largest scope, benefits from crops/water/animals already
    existing)

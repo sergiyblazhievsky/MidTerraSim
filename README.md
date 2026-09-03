@@ -58,6 +58,25 @@ python map_viewer.py
 | Space | Jump |
 | Esc | Close the UI (server keeps running) |
 
+### Player and world heights (client-side)
+
+The server only reports a single `surface_y` (`SY`); every ground-relative
+height is the client's business, and they all derive from one helper each so
+they can't drift apart:
+
+| Thing | Y |
+|-------|---|
+| Visual ground, plant bases, grass decal | `surface_top(SY)` = `SY + 0.5` |
+| Walkable floor top (player's feet) | `floor_top(SY)` = `SY + 0.6` |
+| Camera / eyes | feet + `PLAYER_EYE_HEIGHT` (2), i.e. normal bush height |
+
+The floor collider is a thick slab (`FLOOR_THICKNESS`) rather than a thin
+one, and the player spawns with their feet already on it. Both matter: Ursina's
+gravity step scales with frame time, and the frame that builds the terrain and
+vegetation meshes is slow enough that a single step could otherwise skip a thin
+collider and drop the player into the void. `update()` also snaps the player
+back up if they ever end up below the floor. See `takeover.md`'s **Gotchas**.
+
 ## Running Tests
 
 The `server.py` simulation engine (and `chunk.py`'s data model) have an automated test suite under [`tests/`](./tests). It runs entirely offline, against isolated temp-file fixtures — it never touches your real `config.json`, `entities.json`, or `chunks/chunk_0_0.wrld`.
@@ -80,9 +99,10 @@ What's covered:
 - World seeding, tag/diet/avoidance resolution, vegetation stage lookup
 - Item drops: spawn, stage-specific loot, expiry, and pickup (including diet/sleep gating)
 - Flower attack/eat-in-place feeding
+- Herbivore plant diets (`_resolve_plant_diet`, `_act_feed_plants`): grazing ground cover, browsing bushes, and seeking the nearest plant within `feed_radius`
 - Creature pathfinding primitives (`_step_toward`, `_find_nearest_*`, `_move_creature_random`)
 - Creature needs/sleep state machine (`_compute_creature_needs`, `_pick_highest_need`, `_act_feed`, `_creature_move`)
-- Daily/seasonal lifecycle (hunger/age decay, winter aging, summer reproduction, removal)
+- Daily/seasonal lifecycle (hunger/age decay, winter aging, reproduction each season change, removal)
 - The flora simulation cycle (`_sim_step`): decay, season rotation, tag-driven spawn-blocking rules, and season-gated spawning (`spawn.active_seasons`, used by grass)
 - `tick()` scheduling: day/night transitions, revision counting, periodic save/sim-step triggers, creature movement/sleep timing, and `speed_multiplier` scaling
 - The admin `speed_multiplier` control (`set_speed_multiplier`, `admin_state`, `_effective_time`) — validation, and its no-op guarantee at the default value of `1`
@@ -115,7 +135,9 @@ flowers/bushes/trees); they remain in `/state` for the UI client.
     ▸ bush (474)
     ▸ flower (454)
     ▸ tree (212)
-▾ Creatures (5)
+▾ Creatures (10)
+  ▾ rabbit (5)
+    ▸ rabbit #1 ... #5
   ▾ rat (5)
       ▾ rat #1
           position: (13, 88)  age: 2  hunger: 3  sleep: 0  asleep: false
@@ -199,13 +221,24 @@ Defines items, vegetation, and creatures. Loaded independently by **both** `serv
 
 **Vegetation** — `tags`, `block_id`, `stages[]` (texture, optional `render`/`height`/`width`, per-stage loot), `spawn` rules. Stage `render` defaults to `"cross"` (vertical billboard); `"surface"` lays a flat texture on the tile top (used by grass).
 
-**Creatures** — `needs`, `diet` (item names or tags), hunger/age, movement, reproduction, death loot
+**Creatures** — `needs`, `diet`, hunger/age, movement, reproduction, death loot.
+`diet` entries are resolved against both items and vegetation, by name or by
+tag: matching **items** make a carnivore/scavenger that eats drops and attacks
+flowers (rat), while matching **vegetation** makes a herbivore that grazes and
+browses plants within `feed_radius` (rabbit). Diet order is preference order.
 
 Block IDs (`chunk.py`): `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRASS_PATCH=5`
 
 #### Spawn priority (runtime)
 
-Flora are tried in file order on each eligible bare-soil tile: **flower → bush → tree → grass**. First successful roll wins.
+On each eligible tile, flora are tried in file order: **flower → bush → tree → grass**. First successful roll wins.
+
+Eligible tiles:
+
+- **Flower / bush / tree** — bare soil **or** a grass patch (ground cover is a soft under-layer; a plant may claim and replace it)
+- **Grass** — bare soil only (will not stack on an existing grass patch)
+
+Flower/bush/tree never treat grass as an occupying blocker. Grass also has no proximity rules against other flora.
 
 | Plant | Chance | Constraints |
 |-------|--------|-------------|
@@ -223,8 +256,8 @@ Grass itself is decorative ground cover rendered as a flat surface texture
 (`stage.render: "surface"` + `textures/grass.png`) laid over the soil tile:
 `generate_chunk.py` covers every bare-soil tile with it at world-gen time
 (100%, unconditional), while the runtime spawn loop above only re-grows it
-probabilistically afterward (e.g. after a tree/bush/flower dies back to bare
-soil). It decays like any other `flora`-tagged vegetation (moisture-driven).
+on bare soil (and never blocks flower/bush/tree from claiming a grassy tile).
+It decays like any other `flora`-tagged vegetation (moisture-driven).
 
 #### Stage-based loot (on death)
 
@@ -240,6 +273,7 @@ soil). It decays like any other `flora`-tagged vegetation (moisture-driven).
 | Tree | Dead (age ≤ 1) | 3–5 logs, 5–7 sticks |
 | Grass | — | none |
 | Rat | — | 1 meat |
+| Rabbit | — | 2–3 meat |
 
 ## Simulation Overview (server-authoritative)
 
@@ -247,7 +281,7 @@ Each simulation cycle (`cycle_length` seconds):
 
 1. Season may advance, updating moisture, fertility, and ground texture
 2. Flora ages and may die when moisture is low; dead plants spawn stage-based item drops
-3. New flora may spawn on empty grass tiles (fertility roll + per-type chance + proximity rules)
+3. New flora may spawn (fertility roll + per-type chance + proximity rules). Grass patches do not block flower/bush/tree — those may claim a grassy tile.
 4. Fauna creatures act on needs-driven tasks or move randomly (evaluated every `move_interval_day` seconds)
 
 ### Creature feed AI (rats)
@@ -260,7 +294,17 @@ When hungry (`feed` need = `initial_hunger - hunger`):
 4. Move toward nearest dead flower, then live flower
 5. Random move if nothing found
 
-### Creature sleep AI (rats)
+### Creature feed AI (rabbits)
+
+Herbivore diet (`diet: ["grass", "bush"]`, search radius `feed_radius` default 6):
+
+1. If standing on grass cover — eat it (tile returns to bare soil), +1 hunger
+2. Else move toward nearest grass within `feed_radius`
+3. Else if standing on a bush — browse it (bush age −`attack`, +1 hunger); bush dies and drops loot at age 0
+4. Else move toward nearest bush within `feed_radius`
+5. Random move if nothing found
+
+### Creature sleep AI (rats / rabbits)
 
 Sleep is a plain need value with **no threshold** — it just competes with other needs for priority:
 
@@ -271,8 +315,8 @@ Sleep is a plain need value with **no threshold** — it just competes with othe
 Daily and seasonal events:
 
 - **Day start** — fauna lose 1 hunger (or 1 age if starving); sleeping fauna wake up
-- **Summer start** — fauna reproduce near existing individuals
-- **Winter start** — all fauna lose 1 age
+- **Every season start** — fauna reproduce near existing individuals (`reproduce_count`)
+- **Winter start** — all fauna lose 1 age first, then survivors reproduce
 
 ## Project Structure
 

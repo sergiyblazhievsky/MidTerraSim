@@ -158,6 +158,31 @@
       "contains": [
         { "item": "meat", "count": [1, 1] }
       ]
+    },
+    {
+      "name": "rabbit",
+      "tags": ["fauna", "small"],
+      "texture": "textures/rabbit_sniffing_64.png",
+      "sleep_texture": "textures/rabbit_sleeping_64.png",
+      "count": 5,
+      "scale": [1.0, 1.0],
+      "y_offset": 1.0,
+      "move_interval_day": 3.0,
+      "moves_at_night": false,
+      "avoids_block_tag": "tree",
+      "min_spawn_distance": 3,
+      "reproduce_count": [2, 3],
+      "initial_age": 3,
+      "attack": 1,
+      "initial_hunger": 5,
+      "sleep_gain": 0.5,
+      "needs": ["feed", "sleep"],
+      "diet": ["grass", "bush"],
+      "feed_radius": 6,
+      "hunger_per_food": 1,
+      "contains": [
+        { "item": "meat", "count": [2, 3] }
+      ]
     }
   ]
 }

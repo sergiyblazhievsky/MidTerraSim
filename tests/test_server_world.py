@@ -59,12 +59,15 @@ def test_world_exits_if_world_file_missing(isolated_paths):
 def test_world_loads_chunk_and_seeds_creatures(world):
     assert world.sx == 6 and world.sz == 6
     assert world.SY == world.sy - 1
-    # the fixture entities.json defines a single "rat" creature with count=2
-    assert len(world.all_creature_positions) == 1
+    # fixture entities.json defines rat + rabbit, each with count=2
+    assert len(world.all_creature_positions) == 2
     assert len(world.all_creature_positions[0]) == 2
+    assert len(world.all_creature_positions[1]) == 2
     assert len(world.all_creature_stats[0]) == 2
-    ids = {st["id"] for st in world.all_creature_stats[0]}
-    assert len(ids) == 2  # unique ids
+    assert world.creature_defs[0]["name"] == "rat"
+    assert world.creature_defs[1]["name"] == "rabbit"
+    ids = {st["id"] for stats in world.all_creature_stats for st in stats}
+    assert len(ids) == 4  # unique ids across both types
 
 
 def test_seeded_creature_stats_use_entity_defaults(world):
@@ -74,6 +77,13 @@ def test_seeded_creature_stats_use_entity_defaults(world):
     assert st["attack"] == 5
     assert st["sleep"] == 0.0
     assert st["asleep"] is False
+
+
+def test_seeded_rabbit_stats_use_entity_defaults(world):
+    st = world.all_creature_stats[1][0]
+    assert st["age"] == 3
+    assert st["hunger"] == 5
+    assert st["attack"] == 1
 
 
 def test_seed_creatures_falls_back_when_every_tile_is_avoided(world):
@@ -90,6 +100,7 @@ def test_seed_creatures_falls_back_when_every_tile_is_avoided(world):
     world._seed_creatures()
 
     assert len(world.all_creature_positions[0]) == 2
+    assert len(world.all_creature_positions[1]) == 2
 
 
 # ── config hot reload ────────────────────────────────────────────────────────
@@ -611,6 +622,106 @@ def test_act_feed_steps_toward_nearby_food_drop_before_attacking_any_flower(worl
     assert abs(result[0] - 0) + abs(result[1] - 0) == 1
 
 
+# ── rabbit plant-diet feed AI ────────────────────────────────────────────────
+
+def test_resolve_plant_diet_matches_vegetation_names_in_order(world):
+    plants = world._resolve_plant_diet(world.creature_defs[1])
+    assert [p["name"] for p in plants] == ["grass", "bush"]
+
+
+def test_resolve_plant_diet_empty_for_item_only_diet(world):
+    assert world._resolve_plant_diet(world.creature_defs[0]) == []
+
+
+def test_act_feed_rabbit_eats_grass_on_same_tile(world):
+    ci = 1
+    cdef = world.creature_defs[ci]
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    world.chunk.set_block(0, world.SY, 0, GRASS_PATCH)
+    world.chunk.vegetation_ages[(0, 0)] = 5
+    before_rev = world.vegetation_revision
+
+    result = world._act_feed(ci, 0, cdef, 0, 0, avoids=set())
+
+    assert result == (0, 0)
+    assert world.chunk.get_block(0, world.SY, 0) == GRASS
+    assert (0, 0) not in world.chunk.vegetation_ages
+    assert world.all_creature_stats[ci][0]["hunger"] == 1
+    assert world.vegetation_revision == before_rev + 1
+
+
+def test_act_feed_rabbit_seeks_grass_within_feed_radius_before_bush(world):
+    ci = 1
+    cdef = world.creature_defs[ci]
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    # Bush is closer (1 step) than grass (3 steps) — grass still wins by diet order.
+    world.chunk.set_block(1, world.SY, 0, BUSH)
+    world.chunk.vegetation_ages[(1, 0)] = 5
+    world.chunk.set_block(3, world.SY, 0, GRASS_PATCH)
+    world.chunk.vegetation_ages[(3, 0)] = 5
+
+    result = world._act_feed(ci, 0, cdef, 0, 0, avoids=set())
+
+    assert result == (1, 0)  # first step toward grass at (3,0)
+
+
+def test_act_feed_rabbit_browses_bush_when_no_grass_in_range(world):
+    ci = 1
+    cdef = world.creature_defs[ci]
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    world.all_creature_stats[ci][0]["attack"] = 1
+    world.chunk.set_block(0, world.SY, 0, BUSH)
+    world.chunk.vegetation_ages[(0, 0)] = 5
+
+    result = world._act_feed(ci, 0, cdef, 0, 0, avoids=set())
+
+    assert result == (0, 0)
+    assert world.chunk.get_block(0, world.SY, 0) == BUSH
+    assert world.chunk.vegetation_ages[(0, 0)] == 4  # aged +1 toward death
+    assert world.all_creature_stats[ci][0]["hunger"] == 1
+
+
+def test_act_feed_rabbit_kills_bush_when_age_hits_zero(world):
+    ci = 1
+    cdef = world.creature_defs[ci]
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    world.all_creature_stats[ci][0]["attack"] = 1
+    world.chunk.set_block(0, world.SY, 0, BUSH)
+    world.chunk.vegetation_ages[(0, 0)] = 1
+
+    world._act_feed(ci, 0, cdef, 0, 0, avoids=set())
+
+    assert world.chunk.get_block(0, world.SY, 0) == GRASS
+    assert (0, 0) not in world.chunk.vegetation_ages
+    assert any(d["item"] == "berry" for d in world.world_drops)
+
+
+def test_remove_rabbit_drops_two_to_three_meat(world):
+    ci = 1
+    x, z = world.all_creature_positions[ci][0]
+    world.world_drops.clear()
+
+    world._remove_creature(ci, 0)
+
+    meat = [d for d in world.world_drops if d["item"] == "meat" and d["x"] == x and d["z"] == z]
+    assert len(meat) == 1
+    assert 2 <= meat[0]["count"] <= 3
+
+
+def test_on_season_start_rabbit_reproduces_two_offspring(world):
+    ci = 1
+    world.all_creature_positions[ci] = [(2, 2)]
+    world.all_creature_stats[ci] = [{
+        "id": 200, "age": 3, "hunger": 5, "attack": 1,
+        "sleep": 0.0, "asleep": False,
+    }]
+
+    world._on_season_start("spring")
+
+    # fixture reproduce_count [2, 2] -> exactly two offspring
+    assert len(world.all_creature_positions[ci]) == 3
+
+
 # ── creature needs / sleep state machine ─────────────────────────────────────
 
 def test_compute_creature_needs_feed_and_sleep(world):
@@ -741,20 +852,41 @@ def test_on_day_start_wakes_sleeping_creatures_that_have_a_sleep_need(world):
 
 
 def test_on_season_start_winter_ages_and_can_remove(world):
+    # Single animal at age 1 dies on winter before breeding, so the
+    # population ends at zero (no survivors to reproduce).
     ci = 0
-    world.all_creature_stats[ci][0]["age"] = 1
-    before = len(world.all_creature_positions[ci])
+    world.all_creature_positions[ci] = [(1, 1)]
+    world.all_creature_stats[ci] = [{
+        "id": 99, "age": 1, "hunger": 3, "attack": 5,
+        "sleep": 0.0, "asleep": False,
+    }]
 
     world._on_season_start("winter")
 
-    assert len(world.all_creature_positions[ci]) == before - 1
+    assert len(world.all_creature_positions[ci]) == 0
 
 
-def test_on_season_start_summer_reproduces_per_configured_count(world):
+def test_on_season_start_winter_survivor_still_reproduces(world):
+    ci = 0
+    world.all_creature_positions[ci] = [(2, 2)]
+    world.all_creature_stats[ci] = [{
+        "id": 100, "age": 2, "hunger": 3, "attack": 5,
+        "sleep": 0.0, "asleep": False,
+    }]
+
+    world._on_season_start("winter")
+
+    # Survives age tick (2 -> 1), then breeds once (reproduce_count [1, 1]).
+    assert len(world.all_creature_positions[ci]) == 2
+    assert world.all_creature_stats[ci][0]["age"] == 1
+
+
+@pytest.mark.parametrize("season_name", ["spring", "summer", "fall"])
+def test_on_season_start_reproduces_on_every_non_winter_season(world, season_name):
     ci = 0
     before = len(world.all_creature_positions[ci])
 
-    world._on_season_start("summer")
+    world._on_season_start(season_name)
 
     # reproduce_count is [1, 1] in the fixture -> exactly one offspring/parent
     assert len(world.all_creature_positions[ci]) == before * 2
@@ -895,6 +1027,38 @@ def test_sim_step_spawns_bush_when_flower_is_capped_but_bush_is_unblocked(world,
     world._sim_step()
 
     assert world.chunk.get_block(3, world.SY, 3) == BUSH
+
+
+def test_sim_step_flower_can_spawn_on_top_of_a_grass_patch(world, monkeypatch):
+    """Ground-cover is a soft layer: flower/bush/tree may claim a grass tile."""
+    for x in range(world.sx):
+        for z in range(world.sz):
+            world.chunk.set_block(x, world.SY, z, GRASS_PATCH)
+            world.chunk.vegetation_ages[(x, z)] = 5
+
+    monkeypatch.setattr(server_module.random, "randint", lambda lo, hi: 0)
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.0)  # flower chance always hits
+
+    world._sim_step()
+
+    assert world.chunk.get_block(0, world.SY, 0) == FLOWER
+    flower_count = sum(1 for x in range(world.sx) for z in range(world.sz)
+                        if world.chunk.get_block(x, world.SY, z) == FLOWER)
+    assert flower_count > 0
+
+
+def test_sim_step_grass_still_cannot_spawn_on_an_existing_grass_patch(world, monkeypatch):
+    world.chunk.set_block(0, world.SY, 0, GRASS_PATCH)
+    world.chunk.vegetation_ages[(0, 0)] = 5
+    # Leave the rest bare so we can force flower/bush/tree chance to fail
+    # and prove grass does not re-roll onto the already-grassy tile.
+    world.chunk.fertility = 100
+    monkeypatch.setattr(server_module.random, "randint", lambda lo, hi: 0)
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.10)  # only grass chance passes
+
+    world._sim_step()
+
+    assert world.chunk.get_block(0, world.SY, 0) == GRASS_PATCH
 
 
 def test_sim_step_spawns_grass_on_bare_soil_when_season_is_active(world, monkeypatch):
@@ -1055,10 +1219,10 @@ def test_tick_creature_timer_stays_zero_at_night_with_no_night_activity_enabled(
 
 def test_tick_skips_creature_move_for_every_sleeping_creature_at_night(world, monkeypatch):
     monkeypatch.setattr(server_module.time, "time", lambda: 45.0)  # night
-    ci = 0
-    for st in world.all_creature_stats[ci]:
-        st["asleep"] = True  # put every rat to sleep so none should move
-    original_positions = list(world.all_creature_positions[ci])
+    for stats in world.all_creature_stats:
+        for st in stats:
+            st["asleep"] = True  # every fauna instance asleep -> none should move
+    original_positions = [list(p) for p in world.all_creature_positions]
     called = {"count": 0}
     original_move = world._creature_move
 
@@ -1067,12 +1231,12 @@ def test_tick_skips_creature_move_for_every_sleeping_creature_at_night(world, mo
         return original_move(*args, **kwargs)
 
     monkeypatch.setattr(world, "_creature_move", spy)
-    interval = world.creature_defs[ci]["move_interval_day"]
+    interval = world.creature_defs[0]["move_interval_day"]
 
     world.tick(dt=interval + 0.01)
 
     assert called["count"] == 0
-    assert world.all_creature_positions[ci] == original_positions
+    assert [list(p) for p in world.all_creature_positions] == original_positions
 
 
 # ── snapshot for API clients ──────────────────────────────────────────────────
@@ -1107,10 +1271,11 @@ def test_snapshot_vegetation_only_lists_known_flora_blocks_with_their_age(world)
 
 def test_snapshot_creatures_have_stable_ids_and_expected_fields(world):
     snap = world.snapshot()
-    assert len(snap["creatures"]) == len(world.all_creature_positions[0])
-    c = snap["creatures"][0]
+    total = sum(len(p) for p in world.all_creature_positions)
+    assert len(snap["creatures"]) == total
+    c = next(c for c in snap["creatures"] if c["type"] == "rat")
     assert set(c.keys()) == {"id", "type", "x", "z", "age", "hunger", "sleep", "asleep", "needs"}
-    assert c["type"] == "rat"
+    assert any(c["type"] == "rabbit" for c in snap["creatures"])
 
 
 def test_snapshot_creatures_include_computed_needs(world):

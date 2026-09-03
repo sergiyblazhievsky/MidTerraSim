@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from chunk import Chunk, AIR, GRASS
+from chunk import Chunk, AIR, GRASS, GRASS_PATCH
 
 WORLD_FILE = 'chunks/chunk_0_0.wrld'
 CONFIG_PATH = Path(__file__).with_name('config.json')
@@ -232,6 +232,21 @@ class World:
                 edible.update(self._items_with_tag(entry))
         return edible
 
+    def _resolve_plant_diet(self, cdef):
+        """Diet entries that match vegetation by name or tag, in declared order."""
+        result = []
+        seen = set()
+        for entry in cdef.get('diet', []):
+            for vdef in self.entities_cfg.get('vegetation', []):
+                if vdef.get('name') != entry and entry not in vdef.get('tags', []):
+                    continue
+                bid = vdef['block_id']
+                if bid in seen:
+                    continue
+                seen.add(bid)
+                result.append(vdef)
+        return result
+
     def _resolve_avoids(self, cdef):
         tag = cdef.get('avoids_block_tag')
         if tag:
@@ -278,9 +293,12 @@ class World:
                 for _ in range(200):
                     x = random.randint(0, self.sx - 1)
                     z = random.randint(0, self.sz - 1)
-                    block_ok = self.chunk.get_block(x, self.SY, z) not in avoids
+                    surface = self.chunk.get_block(x, self.SY, z)
+                    # Bare soil or decorative grass cover are valid spawn tiles.
+                    surface_ok = surface in (GRASS, GRASS_PATCH)
+                    block_ok = surface not in avoids
                     spaced = all(abs(x - rx) + abs(z - rz) >= min_dist for rx, rz in positions)
-                    if self.chunk.get_block(x, self.SY, z) == GRASS and block_ok and spaced:
+                    if surface_ok and block_ok and spaced:
                         positions.append((x, z))
                         break
                 else:
@@ -407,6 +425,67 @@ class World:
         self.vegetation_revision += 1
         return True
 
+    def _is_veg_at(self, x, z, vdef):
+        return bool(vdef) and self.chunk.get_block(x, self.SY, z) == vdef['block_id']
+
+    def _eat_ground_cover_at(self, x, z, ci, i, cdef, vdef):
+        """Remove ground-cover (grass) on this tile and restore hunger."""
+        if not self._is_veg_at(x, z, vdef):
+            return False
+        st = self.all_creature_stats[ci][i]
+        max_hunger = cdef.get('initial_hunger', 3)
+        if st['hunger'] >= max_hunger:
+            return False
+        hunger_gain = cdef.get('hunger_per_food', 1)
+        self.chunk.set_block(x, self.SY, z, GRASS)
+        self.chunk.vegetation_ages.pop((x, z), None)
+        st['hunger'] += hunger_gain
+        self.vegetation_revision += 1
+        print(f'[feed] {cdef["name"]}#{i} ate {vdef["name"]} at ({x},{z}) '
+              f'hunger={st["hunger"]}')
+        return True
+
+    def _browse_plant_at(self, x, z, ci, i, cdef, vdef):
+        """Damage a standing plant (e.g. bush): age it by attack, gain hunger."""
+        if not self._is_veg_at(x, z, vdef):
+            return False
+        st = self.all_creature_stats[ci][i]
+        max_hunger = cdef.get('initial_hunger', 3)
+        hunger_gain = cdef.get('hunger_per_food', 1)
+        age = self.chunk.vegetation_ages.get((x, z), vdef['initial_age'])
+        age -= st.get('attack', cdef.get('attack', 1))
+        if age <= 0:
+            self._drop_from(vdef, x, z, age=age)
+            self.chunk.set_block(x, self.SY, z, GRASS)
+            self.chunk.vegetation_ages.pop((x, z), None)
+        else:
+            self.chunk.vegetation_ages[(x, z)] = age
+        if st['hunger'] < max_hunger:
+            st['hunger'] += hunger_gain
+        self.vegetation_revision += 1
+        print(f'[feed] {cdef["name"]}#{i} browsed {vdef["name"]} at ({x},{z}) '
+              f'age={self.chunk.vegetation_ages.get((x, z), 0)} '
+              f'hunger={st["hunger"]}')
+        return True
+
+    def _find_nearest_veg(self, x, z, vdef, radius=6):
+        if not vdef:
+            return None
+        bid = vdef['block_id']
+        best = None
+        best_dist = None
+        for fx in range(max(0, x - radius), min(self.sx, x + radius + 1)):
+            for fz in range(max(0, z - radius), min(self.sz, z + radius + 1)):
+                if self.chunk.get_block(fx, self.SY, fz) != bid:
+                    continue
+                dist = self._manhattan(x, z, fx, fz)
+                if dist == 0 or dist > radius:
+                    continue
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
+                    best = (fx, fz)
+        return best
+
     def _eat_food_at_block(self, x, z, ci, i, cdef):
         edible = self._resolve_diet(cdef)
         if not edible:
@@ -506,7 +585,29 @@ class World:
             return (nx, nz)
         return (x, z)
 
+    def _act_feed_plants(self, ci, i, cdef, x, z, avoids, plant_defs):
+        """Herbivore feed: diet order is preference (e.g. grass, then bush)."""
+        radius = int(cdef.get('feed_radius', 6))
+        for vdef in plant_defs:
+            is_cover = (self._has_tag(vdef, 'ground_cover')
+                        or vdef.get('name') == 'grass')
+            if self._is_veg_at(x, z, vdef):
+                if is_cover:
+                    if self._eat_ground_cover_at(x, z, ci, i, cdef, vdef):
+                        return (x, z)
+                elif self._browse_plant_at(x, z, ci, i, cdef, vdef):
+                    return (x, z)
+            target = self._find_nearest_veg(x, z, vdef, radius=radius)
+            if target:
+                step = self._step_toward(x, z, target[0], target[1], avoids)
+                return step if step else (x, z)
+        return self._move_creature_random(x, z, avoids)
+
     def _act_feed(self, ci, i, cdef, x, z, avoids):
+        plant_defs = self._resolve_plant_diet(cdef)
+        if plant_defs:
+            return self._act_feed_plants(ci, i, cdef, x, z, avoids, plant_defs)
+
         st = self.all_creature_stats[ci][i]
 
         if self._eat_food_at_block(x, z, ci, i, cdef):
@@ -597,23 +698,22 @@ class World:
 
     def _on_season_start(self, season_name):
         for ci, cdef in self._creatures_with_tag('fauna'):
-            stats = self.all_creature_stats[ci]
-            to_remove = []
-
+            # Winter ages fauna first so only survivors breed this season.
             if season_name == 'winter':
-                for i, st in enumerate(stats):
+                to_remove = []
+                for i, st in enumerate(self.all_creature_stats[ci]):
                     st['age'] -= 1
                     if st['age'] <= 0:
                         to_remove.append(i)
                 for i in reversed(to_remove):
                     self._remove_creature(ci, i)
 
-            elif season_name == 'summer':
-                lo, hi = cdef.get('reproduce_count', [1, 1])
-                positions_snapshot = list(self.all_creature_positions[ci])
-                for x, z in positions_snapshot:
-                    for _ in range(random.randint(lo, hi)):
-                        self._spawn_creature_at(ci, x, z)
+            # Every season change: each living individual produces offspring.
+            lo, hi = cdef.get('reproduce_count', [1, 1])
+            positions_snapshot = list(self.all_creature_positions[ci])
+            for x, z in positions_snapshot:
+                for _ in range(random.randint(lo, hi)):
+                    self._spawn_creature_at(ci, x, z)
 
     # ── flora simulation cycle ────────────────────────────────────────────
     def _sim_step(self):
@@ -630,6 +730,11 @@ class World:
 
         flora_defs = self._veg_with_tag('flora')
         flora_bids = {v['block_id'] for v in flora_defs}
+        # Ground-cover (grass patches) is a decorative under-layer: it must
+        # not occupy a tile against flower/bush/tree. Those may spawn on top
+        # of (and replace) a grass patch. Grass itself only colonizes bare soil.
+        ground_cover_bids = {v['block_id'] for v in self._veg_with_tag('ground_cover')}
+        occupying_bids = flora_bids - ground_cover_bids
 
         changes = {}
         for x in range(self.sx):
@@ -650,7 +755,8 @@ class World:
 
         for x in range(self.sx):
             for z in range(self.sz):
-                if self.chunk.get_block(x, self.SY, z) in self.veg_defs:
+                bid = self.chunk.get_block(x, self.SY, z)
+                if bid in occupying_bids:
                     continue
                 if random.randint(0, 100) > self.chunk.fertility:
                     continue
@@ -660,6 +766,10 @@ class World:
                     sp = vdef['spawn']
                     active_seasons = sp.get('active_seasons')
                     if active_seasons and self.current_season not in active_seasons:
+                        continue
+                    is_cover = vdef['block_id'] in ground_cover_bids
+                    # Grass only on bare soil; other flora may take over a grass patch.
+                    if is_cover and bid != GRASS:
                         continue
                     if random.random() >= sp['chance']:
                         continue
