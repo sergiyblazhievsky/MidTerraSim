@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
 # World saves (optional: comment out if you want to track world state)
 chunks/*.wrld
 chunks/*.json

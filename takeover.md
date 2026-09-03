@@ -152,6 +152,7 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 5. `chunk.py` gained `overrides_at_y()` read-only helper used by the server's snapshot builder
 6. Sleep-need numeric behavior preserved exactly (no threshold, +0.5/night movement cycle, resets at day start)
 7. Added standalone [`SERVER_CLIENT_API.md`](./SERVER_CLIENT_API.md) — the full HTTP/JSON API contract for third-party clients (exact schema/types/nullability, headers/status codes verified against a running server, thread-safety rules, `entities.json` texture/stage resolution, coordinate/`surface_y` assumptions, polling/reconnect/sync recommendations, curl/PowerShell/Python examples, compatibility guidance, and limitations); trimmed README's HTTP API section to a concise overview that links to it; fixed stale `takeover.md` references to rat `needs` (was documented as `["feed"]` only, actually `["feed", "sleep"]`)
+8. Added an automated test suite under [`tests/`](./tests) (pytest): 114 tests covering `chunk.py` (100%) and `server.py` (94% — only `main()`'s CLI entrypoint/tick-loop is excluded, since that's console wiring rather than testable logic). Uses `tmp_path`-isolated fixtures (`tests/conftest.py`) so tests never touch the real `config.json`/`entities.json`/`chunks/chunk_0_0.wrld`; a real `ThreadingHTTPServer` on an ephemeral port is used for API integration tests. Added `pytest.ini` and `requirements-dev.txt`; documented in README's new "Running Tests" section.
 
 ## Session Work Log (2026-09-02)
 

@@ -1,0 +1,5 @@
+# Test-only dependencies for MidTerraSim's server test suite.
+# Install alongside the runtime dependencies (ursina, pillow):
+#   pip install -r requirements-dev.txt
+pytest>=7.0
+pytest-cov>=4.0

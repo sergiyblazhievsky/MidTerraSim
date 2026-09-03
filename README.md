@@ -58,6 +58,35 @@ python map_viewer.py
 | Space | Jump |
 | Esc | Close the UI (server keeps running) |
 
+## Running Tests
+
+The `server.py` simulation engine (and `chunk.py`'s data model) have an automated test suite under [`tests/`](./tests). It runs entirely offline, against isolated temp-file fixtures — it never touches your real `config.json`, `entities.json`, or `chunks/chunk_0_0.wrld`.
+
+```
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+With coverage:
+
+```
+python -m pytest --cov=server --cov=chunk --cov-report=term-missing
+```
+
+Current coverage: **100%** on `chunk.py`, **94%** on `server.py` (the only uncovered lines are `server.py`'s `main()` CLI entrypoint/tick-loop, which isn't practical to exercise as a unit test).
+
+What's covered:
+- Config loading/merging/hot-reload (`load_config`, `maybe_reload_config`)
+- World seeding, tag/diet/avoidance resolution, vegetation stage lookup
+- Item drops: spawn, stage-specific loot, expiry, and pickup (including diet/sleep gating)
+- Flower attack/eat-in-place feeding
+- Creature pathfinding primitives (`_step_toward`, `_find_nearest_*`, `_move_creature_random`)
+- Creature needs/sleep state machine (`_compute_creature_needs`, `_pick_highest_need`, `_act_feed`, `_creature_move`)
+- Daily/seasonal lifecycle (hunger/age decay, winter aging, summer reproduction, removal)
+- The flora simulation cycle (`_sim_step`): decay, season rotation, and tag-driven spawn-blocking rules
+- `tick()` scheduling: day/night transitions, revision counting, periodic save/sim-step triggers, creature movement/sleep timing
+- The full HTTP/JSON API (`/health`, `/state`, `/save`, unknown routes, unsupported methods, concurrent requests) against a real `ThreadingHTTPServer`
+
 ## HTTP API (`server.py`)
 
 `server.py` exposes a small stdlib-only HTTP/JSON API, bound to
@@ -209,6 +238,9 @@ MidTerraSim/
 ├── entities.json      # Items, vegetation, and creature definitions (read by both processes)
 ├── SERVER_CLIENT_API.md  # Full HTTP/JSON API contract for building your own client
 ├── takeover.md        # Session handoff notes for continuing development
+├── tests/             # Automated test suite for server.py + chunk.py
+├── pytest.ini         # pytest discovery configuration
+├── requirements-dev.txt  # Test-only dependencies (pytest, pytest-cov)
 ├── chunks/            # Saved world state (.wrld)
 └── textures/          # PNG assets (16×16 and 64×64 variants)
 ```
