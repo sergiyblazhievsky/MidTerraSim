@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import server as server_module  # noqa: E402
-from chunk import BUSH, FLOWER, GRASS, TREE, Chunk  # noqa: E402
+from chunk import BUSH, FLOWER, GRASS, GRASS_PATCH, TREE, Chunk  # noqa: E402
 
 
 # A small, deterministic entities.json used by every test. Kept structurally
@@ -125,6 +125,22 @@ TEST_ENTITIES = {
                 "requires_no_tree_within": 2,
                 "requires_no_bush_within": 1,
                 "max_same_within": None,
+            },
+        },
+        {
+            "name": "grass",
+            "tags": ["flora", "ground_cover"],
+            "block_id": GRASS_PATCH,
+            "initial_age": 5,
+            "age_decay_every_n_cycles": 3,
+            "contains": [],
+            "stages": [
+                {"max_age": 99, "texture": "textures/grass_xcross.png", "height": 0.3,
+                 "width": 1.0, "contains": []},
+            ],
+            "spawn": {
+                "chance": 0.150,
+                "active_seasons": ["spring", "summer"],
             },
         },
     ],

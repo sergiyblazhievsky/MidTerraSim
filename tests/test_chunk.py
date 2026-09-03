@@ -2,7 +2,7 @@
 bookkeeping, and JSON persistence)."""
 import json
 
-from chunk import AIR, BUSH, FLOWER, GRASS, TREE, Chunk
+from chunk import AIR, BUSH, FLOWER, GRASS, GRASS_PATCH, TREE, Chunk
 
 
 def test_default_fill_is_air():
@@ -34,6 +34,16 @@ def test_set_block_flower_bush_tree_get_default_ages():
     assert c.vegetation_ages[(0, 0)] == 2
     assert c.vegetation_ages[(1, 0)] == 5
     assert c.vegetation_ages[(2, 0)] == 10
+
+
+def test_set_block_grass_patch_gets_default_age():
+    c = Chunk(size=(3, 2, 3))
+    c.fill(GRASS)
+
+    c.set_block(0, 1, 0, GRASS_PATCH)
+
+    assert c.vegetation_ages[(0, 0)] == 5
+    assert c.get_block(0, 1, 0) == GRASS_PATCH
 
 
 def test_set_block_to_grass_clears_vegetation_age():
@@ -158,3 +168,19 @@ def test_load_backfills_missing_vegetation_age_for_surface_blocks(tmp_path):
     loaded = Chunk.load(str(path))
 
     assert loaded.vegetation_ages[(0, 0)] == 2
+
+
+def test_load_backfills_missing_vegetation_age_for_grass_patch(tmp_path):
+    raw = {
+        "version": 1,
+        "size": [2, 2, 2],
+        "fill": "air",
+        "overrides": {"0,1,0": "grass_patch"},
+    }
+    path = tmp_path / "legacy_grass.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert loaded.get_block(0, 1, 0) == GRASS_PATCH
+    assert loaded.vegetation_ages[(0, 0)] == 5

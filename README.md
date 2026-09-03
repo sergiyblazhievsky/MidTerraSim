@@ -83,7 +83,7 @@ What's covered:
 - Creature pathfinding primitives (`_step_toward`, `_find_nearest_*`, `_move_creature_random`)
 - Creature needs/sleep state machine (`_compute_creature_needs`, `_pick_highest_need`, `_act_feed`, `_creature_move`)
 - Daily/seasonal lifecycle (hunger/age decay, winter aging, summer reproduction, removal)
-- The flora simulation cycle (`_sim_step`): decay, season rotation, and tag-driven spawn-blocking rules
+- The flora simulation cycle (`_sim_step`): decay, season rotation, tag-driven spawn-blocking rules, and season-gated spawning (`spawn.active_seasons`, used by grass)
 - `tick()` scheduling: day/night transitions, revision counting, periodic save/sim-step triggers, creature movement/sleep timing, and `speed_multiplier` scaling
 - The admin `speed_multiplier` control (`set_speed_multiplier`, `admin_state`, `_effective_time`) — validation, and its no-op guarantee at the default value of `1`
 - The full HTTP/JSON API (`/health`, `/state`, `/save`, `/admin`, `/admin/speed_multiplier`, unknown routes, unsupported methods, concurrent requests, and the `/` inspector page) against a real `ThreadingHTTPServer`
@@ -199,19 +199,29 @@ Defines items, vegetation, and creatures. Loaded independently by **both** `serv
 
 **Creatures** — `needs`, `diet` (item names or tags), hunger/age, movement, reproduction, death loot
 
-Block IDs (`chunk.py`): `AIR=0`, `GRASS=1`, `FLOWER=2`, `BUSH=3`, `TREE=4`
+Block IDs (`chunk.py`): `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRASS_PATCH=5`
 
 #### Spawn priority (runtime)
 
-Flora are tried in file order on each eligible grass tile: **flower → bush → tree**. First successful roll wins.
+Flora are tried in file order on each eligible bare-soil tile: **flower → bush → tree → grass**. First successful roll wins.
 
 | Plant | Chance | Constraints |
 |-------|--------|-------------|
 | Flower | 9% | Max 1 neighbor flower within radius 1 |
 | Bush | 3% | No tree/bush within radius 1 |
 | Tree | 1% | No tree within radius 2, no bush within radius 1 |
+| Grass | 15% | Only during `active_seasons` (spring, summer) — no proximity constraints |
 
-All spawns also require a fertility roll (`random 0–100 ≤ chunk.fertility`).
+All spawns also require a fertility roll (`random 0–100 ≤ chunk.fertility`). A
+vegetation entry's `spawn.active_seasons` (optional, e.g. `["spring", "summer"]`)
+gates the whole entry to specific seasons — used by `grass` so bare ground
+stops regrowing grass in fall/winter, but any entry can use it.
+
+Grass itself is decorative ground cover (short cross-billboard, height 0.3):
+`generate_chunk.py` covers every bare-soil tile with it at world-gen time
+(100%, unconditional), while the runtime spawn loop above only re-grows it
+probabilistically afterward (e.g. after a tree/bush/flower dies back to bare
+soil). It decays like any other `flora`-tagged vegetation (moisture-driven).
 
 #### Stage-based loot (on death)
 
@@ -225,6 +235,7 @@ All spawns also require a fertility roll (`random 0–100 ≤ chunk.fertility`).
 | Tree | Small (age 9+) | 3–4 sticks |
 | Tree | Normal/medium | 2–4 logs, 4–6 sticks |
 | Tree | Dead (age ≤ 1) | 3–5 logs, 5–7 sticks |
+| Grass | — | none |
 | Rat | — | 1 meat |
 
 ## Simulation Overview (server-authoritative)

@@ -658,6 +658,9 @@ class World:
                     continue
                 for vdef in flora_defs:
                     sp = vdef['spawn']
+                    active_seasons = sp.get('active_seasons')
+                    if active_seasons and self.current_season not in active_seasons:
+                        continue
                     if random.random() >= sp['chance']:
                         continue
                     blocked = False

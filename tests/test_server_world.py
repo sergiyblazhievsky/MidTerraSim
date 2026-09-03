@@ -9,7 +9,7 @@ import time as time_module
 import pytest
 
 import server as server_module
-from chunk import BUSH, FLOWER, GRASS, TREE
+from chunk import BUSH, FLOWER, GRASS, GRASS_PATCH, TREE
 
 from tests.conftest import isolate_creature
 
@@ -872,10 +872,12 @@ def test_sim_step_blocks_bush_and_tree_spawn_when_a_tree_is_too_close(world, mon
 
     world._sim_step()
 
-    # every candidate is blocked for (0, 0):
+    # flower/bush/tree are all blocked for (0, 0):
     #  - flower: max_same_within already met (2 flowers within radius 1)
     #  - bush/tree: requires_no_tree_within, and the grid is wall-to-wall TREE
-    assert world.chunk.get_block(0, world.SY, 0) == GRASS
+    # grass has no proximity constraints, so it's free to claim the tile as
+    # the lowest-priority fallback (tried last in flora_defs order)
+    assert world.chunk.get_block(0, world.SY, 0) == GRASS_PATCH
 
 
 def test_sim_step_spawns_bush_when_flower_is_capped_but_bush_is_unblocked(world, monkeypatch):
@@ -893,6 +895,39 @@ def test_sim_step_spawns_bush_when_flower_is_capped_but_bush_is_unblocked(world,
     world._sim_step()
 
     assert world.chunk.get_block(3, world.SY, 3) == BUSH
+
+
+def test_sim_step_spawns_grass_on_bare_soil_when_season_is_active(world, monkeypatch):
+    world.chunk.fertility = 100
+    monkeypatch.setattr(server_module.random, "randint", lambda lo, hi: 0)
+    # 0.10 fails flower(0.09)/bush(0.03)/tree(0.01)'s chance rolls but passes
+    # grass's (0.15) -- isolates the assertion to specifically grass's roll.
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.10)
+    assert world.current_season == "spring"  # in grass's active_seasons
+
+    world._sim_step()
+
+    def count(bid):
+        return sum(1 for x in range(world.sx) for z in range(world.sz)
+                    if world.chunk.get_block(x, world.SY, z) == bid)
+
+    assert count(GRASS_PATCH) > 0
+    assert count(FLOWER) == 0  # confirms it was specifically grass's roll
+
+
+def test_sim_step_does_not_spawn_grass_outside_its_active_seasons(world, monkeypatch):
+    world._apply_season("winter")  # not in grass's active_seasons
+    world.chunk.fertility = 100
+    monkeypatch.setattr(server_module.random, "randint", lambda lo, hi: 0)
+    # same roll that succeeded for grass above -- the season gate, not the
+    # chance roll, is what must block it here
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.10)
+
+    world._sim_step()
+
+    grass_count = sum(1 for x in range(world.sx) for z in range(world.sz)
+                       if world.chunk.get_block(x, world.SY, z) == GRASS_PATCH)
+    assert grass_count == 0
 
 
 # ── main tick() scheduling ────────────────────────────────────────────────────

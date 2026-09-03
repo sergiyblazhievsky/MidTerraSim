@@ -5,7 +5,7 @@ Re-run any time you want to reset the world.
 import os
 import random
 from PIL import Image
-from chunk import Chunk, AIR, GRASS, FLOWER, BUSH, TREE
+from chunk import Chunk, AIR, GRASS, FLOWER, BUSH, TREE, GRASS_PATCH
 
 # ── textures ──────────────────────────────────────────────────────────────────
 os.makedirs("textures", exist_ok=True)
@@ -108,6 +108,7 @@ flower_dry_img.save("textures/flower_dry.png")
 print("Saved textures/flower_dry.png")
 
 # bush — generic green leaves on transparent background
+random.seed(48)
 bush_img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
 for py in range(16):
     for px in range(16):
@@ -125,6 +126,7 @@ bush_img.save("textures/bush.png")
 print("Saved textures/bush.png")
 
 # dry bush — brown/tan leaves and sparse stems
+random.seed(49)
 bush_dry_img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
 for py in range(16):
     for px in range(16):
@@ -254,6 +256,7 @@ rat_img.save("textures/rat.png")
 print("Saved textures/rat.png")
 
 # seed — small tan/brown oval drop icon on transparent background, 16x16
+random.seed(50)
 seed_img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
 for py in range(16):
     for px in range(16):
@@ -274,6 +277,38 @@ for py in range(4, 12):
 seed_img.save("textures/seed_16.png")
 seed_img.save("textures/seed.png")
 print("Saved textures/seed_16.png")
+
+# grass — a short tuft of blades on transparent background, 64x64 cross
+# billboard (rendered at a low height, so blades fill most of the canvas
+# rather than leaving empty space at the top the way taller plants do).
+# Explicitly seeded and placed last among texture blocks so it never shifts
+# the global random state consumed by the earlier, unseeded blocks above.
+random.seed(51)
+grass_xcross_img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+_blade_shades = [
+    (60, 140, 50, 255),
+    (80, 160, 60, 255),
+    (45, 110, 40, 255),
+    (100, 175, 70, 255),
+]
+for _ in range(40):
+    bx = random.randint(4, 59)
+    base_y = random.randint(56, 62)
+    blade_h = random.randint(24, 50)
+    drift = random.randint(-8, 8)
+    shade = random.choice(_blade_shades)
+    top_y = max(2, base_y - blade_h)
+    for t in range(blade_h):
+        y = base_y - t
+        if y < top_y:
+            break
+        x = bx + int(drift * (t / blade_h))
+        if 0 <= x < 64 and 0 <= y < 64:
+            grass_xcross_img.putpixel((x, y), shade)
+            if x + 1 < 64:
+                grass_xcross_img.putpixel((x + 1, y), shade)
+grass_xcross_img.save("textures/grass_xcross_64.png")
+print("Saved textures/grass_xcross_64.png")
 
 # ── world ─────────────────────────────────────────────────────────────────────
 os.makedirs("chunks", exist_ok=True)
@@ -354,8 +389,24 @@ for x in range(sx):
         if random.random() < 0.090 and place_flower_if_possible(x, z):
             continue
 
+# cover every remaining bare-soil tile with a grass patch (100% at
+# generation time -- the runtime simulation only re-grows grass
+# probabilistically on tiles that later lose it, see server.py's
+# spawn "active_seasons" gating for the "grass" vegetation entry)
+for x in range(sx):
+    for z in range(sz):
+        if chunk.get_block(x, surface_y, z) != GRASS:
+            continue
+        base_y = surface_y - 1
+        if chunk.get_block(x, base_y, z) == AIR:
+            continue
+        chunk.set_block(x, surface_y, z, GRASS_PATCH)
+        chunk.vegetation_ages[(x, z)] = 5
+
 chunk.save("chunks/chunk_0_0.wrld")
 n_flowers = sum(1 for v in chunk._overrides.values() if v == FLOWER)
 n_bushes = sum(1 for v in chunk._overrides.values() if v == BUSH)
 n_trees = sum(1 for v in chunk._overrides.values() if v == TREE)
-print(f"Saved chunks/chunk_0_0.wrld  ({n_flowers} flowers, {n_bushes} bushes, {n_trees} trees placed)")
+n_grass = sum(1 for v in chunk._overrides.values() if v == GRASS_PATCH)
+print(f"Saved chunks/chunk_0_0.wrld  ({n_flowers} flowers, {n_bushes} bushes, "
+      f"{n_trees} trees, {n_grass} grass patches placed)")

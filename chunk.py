@@ -21,9 +21,15 @@ GRASS  = 1
 FLOWER = 2
 BUSH   = 3
 TREE   = 4
+GRASS_PATCH = 5   # decorative grass tuft/patch grown on top of bare soil (GRASS)
 
-BLOCK_NAMES = {AIR: "air", GRASS: "grass", FLOWER: "flower", BUSH: "bush", TREE: "tree"}
+BLOCK_NAMES = {
+    AIR: "air", GRASS: "grass", FLOWER: "flower", BUSH: "bush", TREE: "tree",
+    GRASS_PATCH: "grass_patch",
+}
 BLOCK_IDS   = {v: k for k, v in BLOCK_NAMES.items()}
+
+_DEFAULT_VEGETATION_AGE = {FLOWER: 2, BUSH: 5, TREE: 10, GRASS_PATCH: 5}
 
 
 class Chunk:
@@ -48,8 +54,8 @@ class Chunk:
 
         if block_id == GRASS:
             self.vegetation_ages.pop((x, z), None)
-        elif block_id in (FLOWER, BUSH, TREE):
-            self.vegetation_ages.setdefault((x, z), 2 if block_id == FLOWER else 5 if block_id == BUSH else 10)
+        elif block_id in _DEFAULT_VEGETATION_AGE:
+            self.vegetation_ages.setdefault((x, z), _DEFAULT_VEGETATION_AGE[block_id])
 
     def fill(self, block_id):
         """Set every position to block_id and clear overrides."""
@@ -125,9 +131,6 @@ class Chunk:
         for x in range(c.size[0]):
             for z in range(c.size[2]):
                 bid = c.get_block(x, c.size[1] - 1, z)
-                if bid in (FLOWER, BUSH, TREE):
-                    c.vegetation_ages.setdefault(
-                        (x, z),
-                        2 if bid == FLOWER else 5 if bid == BUSH else 10,
-                    )
+                if bid in _DEFAULT_VEGETATION_AGE:
+                    c.vegetation_ages.setdefault((x, z), _DEFAULT_VEGETATION_AGE[bid])
         return c

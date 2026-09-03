@@ -52,11 +52,11 @@ with `World.snapshot()` and `make_handler()` in `server.py`.
 
 **Items** — seed, berry, meat tagged `raw` + `food`
 
-**Vegetation** — flower, bush, tree with stages, spawn rules, per-stage loot
+**Vegetation** — flower, bush, tree, grass with stages, spawn rules, per-stage loot
 
 **Creatures** — rat with `needs: ["feed", "sleep"]`, `diet: ["food"]`
 
-Block IDs: `AIR=0`, `GRASS=1`, `FLOWER=2`, `BUSH=3`, `TREE=4`
+Block IDs: `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRASS_PATCH=5`
 
 ### World drops
 
@@ -95,7 +95,7 @@ for the full day/night and lifecycle rules.
 
 ### Flora spawn (runtime `_sim_step`)
 
-Priority order: flower → bush → tree (first win per tile).
+Priority order: flower → bush → tree → grass (first win per tile).
 
 Global gate: bare ground + fertility roll + not already changing.
 
@@ -104,6 +104,16 @@ Global gate: bare ground + fertility roll + not already changing.
 | Flower | 9% | max 1 neighbor flower (r=1); **no tree/bush blockers** |
 | Bush | 3% | no tree/bush within r=1 |
 | Tree | 1% | no tree within r=2, no bush within r=1 |
+| Grass | 15% | `spawn.active_seasons: ["spring", "summer"]` only; no proximity blockers |
+
+`spawn.active_seasons` (optional, list of season names) is a generic gate any
+vegetation entry can use — checked before the chance roll, skips the entry
+entirely outside those seasons. Grass is the first (and currently only) user
+of it. `generate_chunk.py` separately covers every bare-soil tile with grass
+unconditionally at world-gen time (100%); the runtime rule above only handles
+re-growth afterward (e.g. once a tree/bush/flower dies back to bare soil).
+Grass otherwise behaves like any other `flora`-tagged vegetation — it decays
+via the same moisture-driven mechanic, just with no stage-based loot.
 
 ### Stage-based loot
 
@@ -156,6 +166,9 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 9. Set full-grown tree stages (height 4.0) to `"width": 2.0` in `entities.json` (dead/dry and mature stages); `main.py`'s `build_veg_mesh`/`_rebuild_vegetation` now read an optional per-stage `width` (defaults to `1.0` for backward compatibility) to size the cross-quad's horizontal footprint independently of height.
 10. Added a browser-based debug/inspector page: `GET /` on `server.py` now serves a self-contained HTML+CSS+JS page (no external assets, no new dependency) that polls `/state` and renders a collapsible tree — Vegetation/Creatures/Drops grouped by `type`/`item`, with creatures broken out per-instance showing raw stats plus a nested `needs` group. Expand/collapse state survives the 1s poll via a document-level capturing `toggle` listener keyed by a stable `data-key` per node. To support it, `snapshot()` gained two additive fields: `vegetation[].type` (vegetation definition name, mirrors `creatures[].type`) and `creatures[].needs` (the same dict `_compute_creature_needs` uses internally, so the inspector shows *exactly* why a creature is behaving a certain way). Both fields are documented in `SERVER_CLIENT_API.md` and covered by new tests (116 total now).
 11. Added an admin runtime control: `speed_multiplier` (1-100, transient, resets to 1 on restart). `GET /admin` reads it, `POST /admin/speed_multiplier` (JSON `{"value": N}`) sets it with validation. Implemented as a virtual-time offset (`World._effective_time()` = `time.time() + _time_offset`) added on top of the real wall clock, plus a `scaled_dt = dt * speed_multiplier` fed into every per-tick accumulator (`_creature_timers`, `_sim_timer`, `_save_timer`) — this scales day/night, creature movement/needs, the flora sim cycle, periodic saves, and item-drop aging *uniformly*, and is a byte-for-byte no-op at the default multiplier of `1` (offset never leaves `0`), so it required zero changes to any pre-existing test. Drop `spawn_time`/age tracking and `snapshot()`'s `now` were switched from raw `time.time()` to `_effective_time()` for consistency. Exposed in the `/` inspector page as an "Admin" panel (number input + Apply button, live-synced `speed_multiplier` display). Documented in `SERVER_CLIENT_API.md` §4b and `README.md`; 23 new tests added (139 total), 95% server.py coverage, verified stable across repeated runs and via a live browser smoke test.
+12. Split the inspector page's combined status line into a dedicated, bold "Season/Cycle/Day" line plus a smaller secondary technical line (revision/updated timestamp) — the info was already there but easy to overlook mixed together.
+13. Replaced the green grass ground look with soil: generated `textures/soil.png`/`soil_fall.png`/`soil_winter.png` (procedural earth/mud tones matching the existing per-season variation pattern), updated every `grass.png`/`grass_fall.png`/`grass_winter.png` reference (`config.json`, `server.py` DEFAULT_CONFIG + initial `_terrain_texture`, `generate_chunk.py`, test fixtures/assertions, docs), removed the old grass texture files. `chunk.py`'s `GRASS` block constant/save-format name intentionally left untouched — purely a visual/texture change, not a data-model change.
+14. Added decorative grass patches as a proper vegetation type: `GRASS_PATCH = 5` in `chunk.py` (with a `_DEFAULT_VEGETATION_AGE` lookup table replacing the old hardcoded FLOWER/BUSH/TREE conditional chain in `set_block`/`load`, so new block types plug in without touching that logic again), and a new `"grass"` entry in `entities.json` (single stage, height 0.3/width 1.0, no loot, tried last in spawn priority so flower/bush/tree keep first claim on open tiles). `generate_chunk.py` now covers every remaining bare-soil tile with grass unconditionally after placing trees/bushes/flowers (100% at world-gen). At runtime, `_sim_step`'s spawn loop gained a generic `spawn.active_seasons` gate (checked before the chance roll, skips the whole entry outside those seasons) — grass uses `["spring", "summer"]` so it stops regrowing in fall/winter; entries without the field are unaffected. New `textures/grass_xcross_64.png` (procedural blade tuft, 64×64 cross billboard). 8 new tests (143 total), one existing spawn-priority test updated (grass now legitimately wins where nothing used to spawn, since it has no proximity blockers), verified live via a running server + inspector page (8833 grass patches on a fresh 100×100 world).
 
 ## Session Work Log (2026-09-02)
 

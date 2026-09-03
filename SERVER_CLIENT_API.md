@@ -322,8 +322,8 @@ immediately after boot in most runs.
 | Field | Type | Semantics |
 |-------|------|-----------|
 | `x`, `z` | int | Block position on the surface layer (`y` is always `chunk.surface_y`) |
-| `block_id` | int | Raw terrain block ID from [`chunk.py`](./chunk.py): `2` = flower, `3` = bush, `4` = tree (`0`=air, `1`=the default bare-ground block, internally still named `GRASS` in `chunk.py` for save-format/historical reasons even though it now renders as soil — never appear here, only actual flora blocks are listed) |
-| `type` | string | Vegetation definition name from `entities.json`'s `vegetation[]` (`"flower"`, `"bush"`, `"tree"`) — the human-readable equivalent of `block_id`; look this up to get stage/texture metadata (see §9) |
+| `block_id` | int | Raw terrain block ID from [`chunk.py`](./chunk.py): `2` = flower, `3` = bush, `4` = tree, `5` = grass patch (`0`=air, `1`=the default bare-ground block, internally still named `GRASS` in `chunk.py` for save-format/historical reasons even though it now renders as soil — never appear here, only actual flora blocks are listed) |
+| `type` | string | Vegetation definition name from `entities.json`'s `vegetation[]` (`"flower"`, `"bush"`, `"tree"`, `"grass"`) — the human-readable equivalent of `block_id`; look this up to get stage/texture metadata (see §9) |
 | `age` | int \| `null` | Current vegetation age used to resolve the growth **stage** (see §9). **Nullable**: it is `null` only in the edge case where a flora block exists on the map but has no tracked age yet (e.g. a freshly loaded/foreign save missing that entry). Treat `null` the same as "unknown — use the definition's `initial_age`" the way [`main.py`](./main.py) does. |
 
 There is **no** entry for empty/bare-ground/air tiles — the array only lists
@@ -498,12 +498,15 @@ key (fall back to a placeholder/color) for forward compatibility.
 ### File-order / compatibility implications
 
 - `entities.json`'s array order matters for two things beyond simple lookup:
-  spawn priority (flora are tried **flower → bush → tree**, first
+  spawn priority (flora are tried **flower → bush → tree → grass**, first
   successful roll per tile wins) and stage resolution (stages are scanned
   in file order, so `stages[]` **must** stay sorted by ascending
   `max_age`). If you maintain your own copy or a variant of `entities.json`,
   preserve stage ordering or stage resolution will silently pick the wrong
-  texture.
+  texture. A vegetation entry's `spawn.active_seasons` (optional array of
+  season names) additionally gates the *whole entry* to only attempt its
+  chance roll during those seasons — `grass` uses this to stop regrowing in
+  fall/winter; entries without it are unrestricted.
 - The server and any client **must agree on `entities.json` contents** —
   `block_id` values, item/creature names, and stage counts are the join
   keys between `/state`'s terse per-instance data and your local
