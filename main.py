@@ -188,6 +188,28 @@ def build_veg_mesh(entries, sy):
     return Mesh(vertices=verts, triangles=tris, uvs=uvs, mode='triangle')
 
 
+def build_surface_veg_mesh(entries, sy):
+    """Horizontal quads flush with the terrain top — used for ground-cover
+    flora (grass patches) that should read as a surface texture on the
+    block rather than a vertical plant billboard."""
+    verts, tris, uvs = [], [], []
+    # Slightly above the soil top face to avoid z-fighting with the ground mesh.
+    y = sy + 0.5 + 0.01
+    for e in entries:
+        x, z = e['x'], e['z']
+        base = len(verts)
+        verts += [
+            (x - 0.5, y, z - 0.5),
+            (x + 0.5, y, z - 0.5),
+            (x + 0.5, y, z + 0.5),
+            (x - 0.5, y, z + 0.5),
+        ]
+        tris += [base, base + 1, base + 2, base, base + 2, base + 3]
+        tris += [base + 2, base + 1, base, base + 3, base + 2, base]
+        uvs += [(0, 0), (1, 0), (1, 1), (0, 1)]
+    return Mesh(vertices=verts, triangles=tris, uvs=uvs, mode='triangle')
+
+
 def empty_mesh():
     return Mesh(vertices=[], triangles=[], uvs=[], mode='triangle')
 
@@ -205,10 +227,12 @@ ambient_light = AmbientLight(color=color.white, strength=1.0)
 # placeholder ground so the player doesn't fall while we wait to connect
 _temp_floor = Entity(model='cube', scale=(1000, 1, 1000), position=(0, -0.5, 0),
                       collider='box', visible=False)
-# height=2: the camera sits this many units above wherever the controller's
-# feet land (Ursina's default is already 2, but set it explicitly so this
-# eye height doesn't silently change if that default ever does).
-player = FirstPersonController(position=(0, 2, 0), height=2)
+# Eye height above the controller's feet (which sit on the ground collider).
+# Ursina's FirstPersonController only applies this to camera_pivot at init,
+# so we also re-assert camera_pivot.y after world build.
+PLAYER_EYE_HEIGHT = 2.0
+player = FirstPersonController(position=(0, 2, 0), height=PLAYER_EYE_HEIGHT)
+player.camera_pivot.y = PLAYER_EYE_HEIGHT
 mouse.visible = False
 mouse.locked = True
 
@@ -305,20 +329,27 @@ def _build_world(snap):
             ent.setTransparency(1)
             veg_entities[(bid, si)] = ent
 
+    # Solid walkable collider: default cube is centered, so position.y=SY with
+    # scale_y=1 puts the top face at SY+0.5 — flush with the visual ground mesh.
     floor = Entity(
         model='cube',
         scale=(sx, 1, sz),
-        position=(sx / 2 - 0.5, SY, sz / 2 - 0.5),  # top face lands at SY+0.5, matching the visual ground mesh
+        position=(sx / 2 - 0.5, SY, sz / 2 - 0.5),
         collider='box',
         visible=False,
     )
 
-    player.position = (sx / 2, SY + 2, sz / 2)
+    player.height = PLAYER_EYE_HEIGHT
+    player.camera_pivot.y = PLAYER_EYE_HEIGHT
+    # Spawn above the surface; FirstPersonController gravity will settle
+    # the feet onto the floor top (SY+0.5).
+    player.position = (sx / 2, SY + 0.5 + PLAYER_EYE_HEIGHT, sz / 2)
     print(f'[client] world built ({sx}x{sz}, surface_y={SY}).')
 
 
 def _rebuild_vegetation(vegetation_list):
-    groups = {}
+    groups = {}   # (bid, si) -> list of mesh entries
+    modes = {}    # (bid, si) -> 'cross' | 'surface'
     for v in vegetation_list:
         bid = v['block_id']
         vdef = veg_defs.get(bid)
@@ -327,14 +358,20 @@ def _rebuild_vegetation(vegetation_list):
         age = v['age'] if v['age'] is not None else vdef['initial_age']
         stage = _get_stage(vdef, age)
         si = vdef['stages'].index(stage)
-        groups.setdefault((bid, si), []).append({
+        key = (bid, si)
+        modes[key] = stage.get('render', 'cross')
+        groups.setdefault(key, []).append({
             'x': v['x'], 'z': v['z'],
-            'height': stage['height'],
+            'height': stage.get('height', 1.0),
             'width': stage.get('width', 1.0),
         })
 
     for key, ent in veg_entities.items():
-        ent.model = build_veg_mesh(groups.get(key, []), SY)
+        entries = groups.get(key, [])
+        if modes.get(key, 'cross') == 'surface':
+            ent.model = build_surface_veg_mesh(entries, SY)
+        else:
+            ent.model = build_veg_mesh(entries, SY)
 
 
 def _create_drop_entity(item):

@@ -928,7 +928,11 @@ INSPECTOR_HTML = """<!doctype html>
   }
 
   function renderVegetation(state) {
-    const groups = groupBy(state.vegetation, v => v.type);
+    // Grass patches cover nearly every bare tile and drown out the
+    // interesting flora in this debug view -- filter them out of the
+    // inspector only (they still exist in /state for the UI client).
+    const flora = state.vegetation.filter(v => v.type !== 'grass');
+    const groups = groupBy(flora, v => v.type);
     let html = '';
     for (const name of Object.keys(groups).sort()) {
       const items = groups[name];
@@ -939,7 +943,7 @@ INSPECTOR_HTML = """<!doctype html>
       }
       html += details(`veg:${name}`, name, items.length, inner);
     }
-    return details('veg', 'Vegetation', state.vegetation.length, html, 'section');
+    return details('veg', 'Vegetation', flora.length, html, 'section');
   }
 
   function renderNeeds(parentKey, needs) {

@@ -106,7 +106,9 @@ Open `http://127.0.0.1:8765/` (or your configured host/port) in any browser
 for a live, self-contained inspector page — no build step, no external
 assets. It polls `/state` once per second and renders everything as a
 collapsible tree, grouped by type, with each creature broken out to show its
-raw stats and the server's currently-computed `needs`:
+raw stats and the server's currently-computed `needs`. Grass patches are
+omitted from the Vegetation section (they cover most of the map and drown out
+flowers/bushes/trees); they remain in `/state` for the UI client.
 
 ```
 ▾ Vegetation (1140)
@@ -195,7 +197,7 @@ Defines items, vegetation, and creatures. Loaded independently by **both** `serv
 
 **Items** — `name`, `tags` (e.g. `raw`, `food` for seed/berry/meat)
 
-**Vegetation** — `tags`, `block_id`, `stages[]` (texture, height, per-stage loot), `spawn` rules
+**Vegetation** — `tags`, `block_id`, `stages[]` (texture, optional `render`/`height`/`width`, per-stage loot), `spawn` rules. Stage `render` defaults to `"cross"` (vertical billboard); `"surface"` lays a flat texture on the tile top (used by grass).
 
 **Creatures** — `needs`, `diet` (item names or tags), hunger/age, movement, reproduction, death loot
 
@@ -217,7 +219,8 @@ vegetation entry's `spawn.active_seasons` (optional, e.g. `["spring", "summer"]`
 gates the whole entry to specific seasons — used by `grass` so bare ground
 stops regrowing grass in fall/winter, but any entry can use it.
 
-Grass itself is decorative ground cover (short cross-billboard, height 0.3):
+Grass itself is decorative ground cover rendered as a flat surface texture
+(`stage.render: "surface"` + `textures/grass.png`) laid over the soil tile:
 `generate_chunk.py` covers every bare-soil tile with it at world-gen time
 (100%, unconditional), while the runtime spawn loop above only re-grows it
 probabilistically afterward (e.g. after a tree/bush/flower dies back to bare
@@ -284,9 +287,16 @@ MidTerraSim/
 ├── entities.json      # Items, vegetation, and creature definitions (read by both processes)
 ├── SERVER_CLIENT_API.md  # Full HTTP/JSON API contract for building your own client
 ├── takeover.md        # Session handoff notes for continuing development
+├── roadmap.md         # Planned future work / backlog
 ├── tests/             # Automated test suite for server.py + chunk.py
 ├── pytest.ini         # pytest discovery configuration
 ├── requirements-dev.txt  # Test-only dependencies (pytest, pytest-cov)
 ├── chunks/            # Saved world state (.wrld)
 └── textures/          # PNG assets (16×16 and 64×64 variants)
 ```
+
+## Roadmap
+
+Planned but not-yet-implemented work (new creatures, flora variety, terrain
+generation, water, crops, and more) is tracked in
+[`roadmap.md`](./roadmap.md).

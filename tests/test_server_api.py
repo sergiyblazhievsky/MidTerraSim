@@ -83,6 +83,9 @@ def test_root_serves_the_html_inspector_page(running_server):
     assert "Server Inspector" in body
     assert "/state" in body  # the page polls the JSON API client-side
     assert "/admin/speed_multiplier" in body  # the admin panel posts here
+    # grass patches cover most of the map; the inspector deliberately
+    # hides them so flowers/bushes/trees stay readable
+    assert "v.type !== 'grass'" in body
 
 
 def test_admin_get_returns_default_speed_multiplier(running_server):

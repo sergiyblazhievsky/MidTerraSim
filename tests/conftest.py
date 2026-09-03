@@ -135,8 +135,8 @@ TEST_ENTITIES = {
             "age_decay_every_n_cycles": 3,
             "contains": [],
             "stages": [
-                {"max_age": 99, "texture": "textures/grass_xcross.png", "height": 0.3,
-                 "width": 1.0, "contains": []},
+                {"max_age": 99, "texture": "textures/grass.png", "render": "surface",
+                 "contains": []},
             ],
             "spawn": {
                 "chance": 0.150,

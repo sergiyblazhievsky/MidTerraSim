@@ -278,37 +278,30 @@ seed_img.save("textures/seed_16.png")
 seed_img.save("textures/seed.png")
 print("Saved textures/seed_16.png")
 
-# grass — a short tuft of blades on transparent background, 64x64 cross
-# billboard (rendered at a low height, so blades fill most of the canvas
-# rather than leaving empty space at the top the way taller plants do).
-# Explicitly seeded and placed last among texture blocks so it never shifts
-# the global random state consumed by the earlier, unseeded blocks above.
+# grass — opaque noisy green tile used as a flat ground-cover surface
+# (replaces soil on tiles that have a grass vegetation patch). Distinct
+# from the seasonal soil textures; not season-tinted itself.
 random.seed(51)
-grass_xcross_img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-_blade_shades = [
-    (60, 140, 50, 255),
-    (80, 160, 60, 255),
-    (45, 110, 40, 255),
-    (100, 175, 70, 255),
-]
-for _ in range(40):
-    bx = random.randint(4, 59)
-    base_y = random.randint(56, 62)
-    blade_h = random.randint(24, 50)
-    drift = random.randint(-8, 8)
-    shade = random.choice(_blade_shades)
-    top_y = max(2, base_y - blade_h)
-    for t in range(blade_h):
-        y = base_y - t
-        if y < top_y:
-            break
-        x = bx + int(drift * (t / blade_h))
-        if 0 <= x < 64 and 0 <= y < 64:
-            grass_xcross_img.putpixel((x, y), shade)
-            if x + 1 < 64:
-                grass_xcross_img.putpixel((x + 1, y), shade)
-grass_xcross_img.save("textures/grass_xcross_64.png")
-print("Saved textures/grass_xcross_64.png")
+grass_img = Image.new("RGB", (16, 16))
+for py in range(16):
+    for px in range(16):
+        grass_img.putpixel((px, py), (
+            random.randint(65, 95),
+            random.randint(115, 155),
+            random.randint(40, 70),
+        ))
+# a few darker blade/clump speckles so the tile reads as turf, not flat paint
+for _ in range(22):
+    px, py = random.randint(0, 15), random.randint(0, 15)
+    shade = random.randint(-35, -10)
+    r, g, b = grass_img.getpixel((px, py))
+    grass_img.putpixel((px, py), (
+        max(0, r + shade),
+        max(0, g + shade // 2),
+        max(0, b + shade // 3),
+    ))
+grass_img.save("textures/grass.png")
+print("Saved textures/grass.png")
 
 # ── world ─────────────────────────────────────────────────────────────────────
 os.makedirs("chunks", exist_ok=True)
