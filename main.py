@@ -205,7 +205,10 @@ ambient_light = AmbientLight(color=color.white, strength=1.0)
 # placeholder ground so the player doesn't fall while we wait to connect
 _temp_floor = Entity(model='cube', scale=(1000, 1, 1000), position=(0, -0.5, 0),
                       collider='box', visible=False)
-player = FirstPersonController(position=(0, 2, 0))
+# height=2: the camera sits this many units above wherever the controller's
+# feet land (Ursina's default is already 2, but set it explicitly so this
+# eye height doesn't silently change if that default ever does).
+player = FirstPersonController(position=(0, 2, 0), height=2)
 mouse.visible = False
 mouse.locked = True
 
@@ -305,7 +308,7 @@ def _build_world(snap):
     floor = Entity(
         model='cube',
         scale=(sx, 1, sz),
-        position=(sx / 2 - 0.5, SY + 0.5, sz / 2 - 0.5),
+        position=(sx / 2 - 0.5, SY, sz / 2 - 0.5),  # top face lands at SY+0.5, matching the visual ground mesh
         collider='box',
         visible=False,
     )
