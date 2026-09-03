@@ -76,18 +76,21 @@ three routes below are fixed.
 
 | Endpoint | Method | Success | Description |
 |----------|--------|---------|--------------|
-| `/` | GET | `200` | Human-facing HTML debug page — a self-contained, dependency-free tree view of the world (see §4a). Not part of the JSON API contract. |
+| `/` | GET | `200` | Human-facing HTML debug page — a self-contained, dependency-free tree view of the world, plus the admin speed-multiplier control (see §4a). Not part of the JSON API contract. |
 | `/health` | GET | `200` | Cheap liveness/poll check |
 | `/state`  | GET | `200` | Full renderable world snapshot |
+| `/admin`  | GET | `200` | Current admin-controlled runtime state (see §4b) |
 | `/save`   | POST | `200` | Force an immediate save to disk |
+| `/admin/speed_multiplier` | POST | `200`/`400` | Set the runtime simulation speed multiplier (see §4b) |
 | anything else | GET/POST | `404` | `{"error": "not found"}` |
 | any route | any other HTTP method (`PUT`, `DELETE`, `HEAD`, …) | `501` | Unsupported method (default `BaseHTTPRequestHandler` behavior; no JSON body — `do_GET`/`do_POST` are the only handlers defined) |
 
 ### Request headers
 
 No custom or required request headers. No request body is read or expected
-for any route (including `POST /save`); anything you send as a body is
-ignored.
+for `GET` routes or `POST /save`; anything you send as a body to those is
+ignored. `POST /admin/speed_multiplier` is the one route that *does* read a
+JSON request body — see §4b.
 
 ### Response headers
 
@@ -131,9 +134,50 @@ nested `needs` group with the server's *currently computed* need values (see
 1-second poll (tracked client-side by a stable `data-key` per node), so the
 tree doesn't jump around while you're inspecting it.
 
+Above the tree, an **Admin** panel shows the current `speed_multiplier` and
+lets you change it (see §4b) without leaving the browser.
+
 This route is a debugging convenience, not a stable API contract — its HTML
 structure/styling may change between versions. Third-party clients should
 use `GET /state` directly rather than scraping this page.
+
+### 4b. Admin: `GET /admin`, `POST /admin/speed_multiplier`
+
+A small, intentionally minimal admin surface for runtime testing controls.
+`speed_multiplier` is the first (and currently only) such control — it's
+**not** part of `config.json` and **not** persisted; it's in-memory only and
+always resets to `1` on server restart.
+
+**`GET /admin`** — current admin-controlled runtime state:
+
+```json
+{"speed_multiplier": 1}
+```
+
+**`POST /admin/speed_multiplier`** — set it. Requires a JSON request body:
+
+```json
+{"value": 10}
+```
+
+| Response | Status | Body |
+|---|---|---|
+| Accepted | `200` | `{"speed_multiplier": 10}` — echoes the new value |
+| Missing/empty body, missing `value`, or malformed JSON | `400` | `{"error": "expected a JSON body: {\"value\": <int 1-100>}"}` |
+| `value` outside `1`–`100`, or not coercible to `int` | `400` | `{"error": "speed_multiplier must be between 1 and 100"}` (or `"...must be an integer"`) |
+
+`value` is coerced with Python's `int(...)`, so numeric strings like `"10"`
+are accepted too. On rejection, `world.speed_multiplier` is left unchanged.
+
+**What it does:** scales *every* time-based feature uniformly — day/night
+progression, creature movement/needs ticks, the flora simulation cycle
+(vegetation aging/spawn, season rotation), periodic saves, and item-drop
+aging — all speed up together by the same factor. Internally the server
+tracks a virtual-time offset added on top of the real wall clock; at the
+default of `1` this offset never leaves `0`, so `phase`/drop `age` are
+byte-for-byte identical to a server that has never touched `/admin` (see
+§5's `time.phase` and `drops[].age` notes, updated below). There is
+**no** way to *slow down* the simulation (minimum is `1`, i.e. real-time).
 
 ### `GET /health`
 
@@ -254,7 +298,7 @@ changes if the world file itself is regenerated and the server restarted).
 | `cycle` | int | Number of completed simulation cycles (`cycle_length` seconds each) since server start. Advances the season every `season_length` cycles. |
 | `day` | int | Number of day/night transitions (sunrises) since server start; starts at `0`/`1` (see below) |
 | `is_day` | bool | `true` while `phase < 40/60 (≈0.667)`, i.e. during the "day" portion of the cycle; `false` during "night" |
-| `phase` | float | `0.0`–`1.0` fraction through the current `day_night_cycle`, computed as `(wall_clock_time % day_night_cycle) / day_night_cycle` on the server. **Not** relative to server start — it's derived from `time.time()`, so absolute value has no cross-machine meaning, only its progression matters. |
+| `phase` | float | `0.0`–`1.0` fraction through the current `day_night_cycle`, computed as `(effective_time % day_night_cycle) / day_night_cycle` on the server, where `effective_time` is the real wall clock plus an accumulated virtual-time offset from `speed_multiplier` (see §4b). **Not** relative to server start — at the default multiplier of `1` the offset never leaves `0`, so `effective_time` is byte-for-byte `time.time()` and absolute value still has no cross-machine meaning, only its progression matters. At `speed_multiplier > 1`, `phase` (and everything else in §4b's list) progresses faster than real elapsed time by that factor. |
 | `day_night_cycle` | float | Seconds for one full day+night loop (echo of `config.json`'s `day_night_cycle`, hot-reloadable) |
 
 `day` increments the instant `is_day` flips `false → true` (dawn), and that
@@ -321,7 +365,7 @@ snapshots; existing IDs' fields update in place.
 | `item` | string | Item definition name from `entities.json`'s `items[]` (`"seed"`, `"berry"`, `"meat"`, `"log"`, `"stick"`) — look this up for the item's `texture`/`tags` |
 | `count` | int | Number of stacked units at this position (a single drop entity can represent multiple units, e.g. `"count": 2` berries) |
 | `x`, `z` | int | Ground tile position |
-| `age` | float | **Seconds since this drop spawned**, computed fresh on every `/state` call as `now - spawn_time` — this value keeps increasing between polls even though the underlying drop object doesn't otherwise change, and it is **not** wall-clock-continuous the way `time.phase` is (see §10 for local extrapolation). Drops are removed once `age >= drop_lifetime` (from `config.json`) or once eaten by a creature. |
+| `age` | float | **Seconds of effective (speed-multiplier-scaled) time since this drop spawned**, computed fresh on every `/state` call as `now - spawn_time` where both use the same `effective_time` as `time.phase` (see §4b) — this value keeps increasing between polls even though the underlying drop object doesn't otherwise change, and it is **not** wall-clock-continuous the way real elapsed time is if `speed_multiplier != 1` (see §10 for local extrapolation). Drops are removed once `age >= drop_lifetime` (from `config.json`) or once eaten by a creature. |
 
 ---
 
@@ -534,6 +578,17 @@ Use the interpolated `phase`/`is_day` for lighting/visual transitions every
 frame; only trust the *raw* snapshot value for logic that must match the
 server exactly (there isn't any such client-side logic in the current
 implementation — day/night is purely cosmetic client-side).
+
+> **Note on `speed_multiplier` (§4b):** this extrapolation assumes 1 second
+> of client-side `time.time()` corresponds to 1 second of server progress.
+> That's only true at the default `speed_multiplier = 1`. At a higher
+> multiplier, the server's `phase` actually advances faster than this local
+> extrapolation assumes, so visuals will slightly under-shoot between polls
+> and "catch up" (a small, self-correcting jump) on the next one. This is
+> harmless with the default `poll_interval` (0.15s) relative to typical
+> `day_night_cycle` values, but if you poll much less frequently while also
+> running at a high multiplier, consider also reading `/admin` and scaling
+> the extrapolated `elapsed` by the current `speed_multiplier`.
 
 ### Local drop "bobbing" animation
 

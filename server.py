@@ -140,6 +140,16 @@ class World:
         self.revision = 0
         self.vegetation_revision = 0
 
+        # ── admin-controlled runtime state ─────────────────────────────────
+        # Not persisted to config.json or the world file -- intentionally
+        # transient, reset to the default on every server restart. Scales
+        # everything time-based (day/night, creature movement/needs ticks,
+        # the flora sim cycle, periodic saves, and item-drop aging) uniformly
+        # via an accumulated virtual-time offset added on top of the real
+        # wall clock -- see _effective_time().
+        self.speed_multiplier = 1
+        self._time_offset = 0.0
+
         print(f'[server] world loaded: {self.sx}x{self.sy}x{self.sz} (surface_y={self.SY})')
         for ci, cdef in enumerate(self.creature_defs):
             print(f'[server] spawned {len(self.all_creature_positions[ci])}x {cdef["name"]}')
@@ -171,6 +181,33 @@ class World:
             self._apply_config(self.config)
             # re-apply current season in case its values changed under our feet
             self._apply_season(self.current_season)
+
+    # ── admin: runtime speed control ─────────────────────────────────────
+    def _effective_time(self):
+        """Wall-clock time plus any accumulated virtual-time bonus from
+        speed_multiplier > 1. Equals plain time.time() whenever the
+        multiplier is at its default of 1 (offset never leaves 0), so every
+        time-based feature in this class can use it unconditionally without
+        changing behavior for the common case."""
+        return time.time() + self._time_offset
+
+    def set_speed_multiplier(self, value):
+        """Set the runtime simulation speed multiplier (1-100). Scales
+        day/night, creature movement/needs ticks, the flora sim cycle,
+        periodic saves, and item-drop aging uniformly. Transient admin
+        state -- not persisted, resets to 1 on server restart."""
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise ValueError('speed_multiplier must be an integer')
+        if not (1 <= value <= 100):
+            raise ValueError('speed_multiplier must be between 1 and 100')
+        self.speed_multiplier = value
+        return self.speed_multiplier
+
+    def admin_state(self):
+        """Current admin-controlled runtime state, for GET /admin."""
+        return {'speed_multiplier': self.speed_multiplier}
 
     # ── tag / lookup helpers (mirrors original main.py) ──────────────────
     @staticmethod
@@ -289,7 +326,7 @@ class World:
         self._next_drop_id += 1
         self.world_drops.append({
             'id': self._next_drop_id, 'item': item, 'count': count,
-            'x': x, 'z': z, 'spawn_time': time.time(),
+            'x': x, 'z': z, 'spawn_time': self._effective_time(),
         })
         print(f'[drop] {count}x {item} at ({x},{z})')
 
@@ -307,7 +344,7 @@ class World:
                 self._spawn_drop(entry['item'], count, x, z)
 
     def _update_drops(self):
-        now = time.time()
+        now = self._effective_time()
         to_discard = []
 
         for idx, drop in enumerate(self.world_drops):
@@ -669,7 +706,16 @@ class World:
     def tick(self, dt):
         self.maybe_reload_config()
 
-        self._phase = (time.time() % self.day_night_cycle) / self.day_night_cycle
+        # speed_multiplier scales every time-based feature uniformly: extra
+        # "virtual" time accumulates into _time_offset (on top of the real
+        # wall clock _effective_time() reads), and the same scaled dt drives
+        # every dt-accumulator below (creature timers, sim/save timers).
+        # At the default multiplier of 1 this is a no-op: offset stays 0 and
+        # scaled_dt == dt, so behavior is identical to before this feature.
+        scaled_dt = dt * self.speed_multiplier
+        self._time_offset += scaled_dt - dt
+
+        self._phase = (self._effective_time() % self.day_night_cycle) / self.day_night_cycle
         is_day = self._phase < (40.0 / 60.0)
 
         if is_day and not self._prev_is_day:
@@ -685,11 +731,11 @@ class World:
             sleep_enabled = 'sleep' in cdef.get('needs', [])
 
             if is_day:
-                self._creature_timers[ci] += dt
+                self._creature_timers[ci] += scaled_dt
             elif moves_at_night:
-                self._creature_timers[ci] += dt
+                self._creature_timers[ci] += scaled_dt
             elif sleep_enabled:
-                self._creature_timers[ci] += dt
+                self._creature_timers[ci] += scaled_dt
             else:
                 self._creature_timers[ci] = 0.0
                 continue
@@ -716,12 +762,12 @@ class World:
 
         self._update_drops()
 
-        self._sim_timer += dt
+        self._sim_timer += scaled_dt
         if self._sim_timer >= self.SIM_INTERVAL:
             self._sim_timer = 0.0
             self._sim_step()
 
-        self._save_timer += dt
+        self._save_timer += scaled_dt
         if self._save_timer >= self.save_interval:
             self._save_timer = 0.0
             self.save()
@@ -735,7 +781,7 @@ class World:
 
     # ── snapshot for API clients ──────────────────────────────────────────
     def snapshot(self):
-        now = time.time()
+        now = self._effective_time()
         vegetation = [
             {
                 'x': x, 'z': z, 'block_id': bid,
@@ -808,6 +854,12 @@ INSPECTOR_HTML = """<!doctype html>
   h1 { font-size: 16px; margin: 0 0 6px 0; color:#8ecbff; }
   #status { color:#8fbf8f; margin-bottom: 14px; font-size: 12px; }
   #status.stale { color:#e77676; }
+  #admin-panel { margin: 0 0 16px 0; padding: 10px 12px; border: 1px solid #333; border-radius: 4px; background: #171b20; }
+  #admin-panel .title { color:#ffd479; font-weight: bold; margin-right: 10px; }
+  #admin-panel input[type=number] { width: 60px; background:#1b1f24; color:#ddd; border:1px solid #444; border-radius: 3px; padding: 2px 4px; font-family: inherit; }
+  #admin-panel button { background:#2a3038; color:#ddd; border:1px solid #444; border-radius: 3px; padding: 3px 10px; cursor: pointer; font-family: inherit; }
+  #admin-panel button:hover { background:#343b45; }
+  #speed-msg { margin-left: 10px; font-size: 12px; }
   details { margin-left: 18px; }
   details > summary { cursor: pointer; padding: 2px 0; list-style: none; }
   details > summary::-webkit-details-marker { display: none; }
@@ -824,6 +876,14 @@ INSPECTOR_HTML = """<!doctype html>
 <body>
   <h1>MidTerraSim &mdash; Server Inspector</h1>
   <div id="status">connecting&hellip;</div>
+  <div id="admin-panel">
+    <span class="title">Admin</span>
+    Speed multiplier: <strong id="speed-current">1</strong>x
+    &nbsp;&nbsp;
+    <input id="speed-input" type="number" min="1" max="100" step="1" value="1">
+    <button id="speed-apply">Apply</button>
+    <span id="speed-msg"></span>
+  </div>
   <div id="tree"></div>
 <script>
   // Track which <details> nodes are open (by stable key) across re-renders,
@@ -941,7 +1001,53 @@ INSPECTOR_HTML = """<!doctype html>
       statusEl.textContent = 'disconnected -- retrying\\u2026';
       statusEl.classList.add('stale');
     }
+
+    // keep the "current" admin display in sync even if changed from
+    // elsewhere (another browser tab, another admin), without touching
+    // whatever the user is currently typing into the input box.
+    try {
+      const resp = await fetch('/admin', { cache: 'no-store' });
+      if (resp.ok) {
+        const admin = await resp.json();
+        document.getElementById('speed-current').textContent = admin.speed_multiplier;
+      }
+    } catch (err) { /* keep the last known value on screen */ }
   }
+
+  async function applySpeedMultiplier() {
+    const input = document.getElementById('speed-input');
+    const msg = document.getElementById('speed-msg');
+    const value = parseInt(input.value, 10);
+    msg.textContent = '';
+    msg.style.color = '#e77676';
+    if (!Number.isInteger(value) || value < 1 || value > 100) {
+      msg.textContent = 'must be an integer 1-100';
+      return;
+    }
+    try {
+      const resp = await fetch('/admin/speed_multiplier', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        msg.textContent = data.error || ('failed (HTTP ' + resp.status + ')');
+        return;
+      }
+      document.getElementById('speed-current').textContent = data.speed_multiplier;
+      msg.style.color = '#8fbf8f';
+      msg.textContent = 'applied';
+      setTimeout(() => { msg.textContent = ''; }, 2000);
+    } catch (err) {
+      msg.textContent = 'request failed';
+    }
+  }
+
+  document.getElementById('speed-apply').addEventListener('click', applySpeedMultiplier);
+  document.getElementById('speed-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') applySpeedMultiplier();
+  });
 
   poll();
   setInterval(poll, 1000);
@@ -971,6 +1077,15 @@ def make_handler(world):
             self.end_headers()
             self.wfile.write(body)
 
+        def _read_json_body(self):
+            """Read and parse a JSON request body. Returns {} for an empty
+            body. Raises ValueError on malformed JSON."""
+            length = int(self.headers.get('Content-Length', 0) or 0)
+            raw = self.rfile.read(length) if length > 0 else b''
+            if not raw:
+                return {}
+            return json.loads(raw.decode('utf-8'))
+
         def do_GET(self):
             path = urlparse(self.path).path
             if path == '/':
@@ -983,6 +1098,10 @@ def make_handler(world):
                 with world.lock:
                     snap = world.snapshot()
                 self._send_json(snap)
+            elif path == '/admin':
+                with world.lock:
+                    state = world.admin_state()
+                self._send_json(state)
             else:
                 self._send_json({'error': 'not found'}, 404)
 
@@ -993,6 +1112,22 @@ def make_handler(world):
                     world.save()
                     rev = world.revision
                 self._send_json({'saved': True, 'revision': rev})
+            elif path == '/admin/speed_multiplier':
+                try:
+                    payload = self._read_json_body()
+                    value = payload['value']
+                except (ValueError, KeyError):
+                    self._send_json(
+                        {'error': 'expected a JSON body: {"value": <int 1-100>}'}, 400)
+                    return
+                try:
+                    with world.lock:
+                        new_value = world.set_speed_multiplier(value)
+                except (TypeError, ValueError) as exc:
+                    self._send_json({'error': str(exc)}, 400)
+                    return
+                print(f'[admin] speed_multiplier set to {new_value}')
+                self._send_json({'speed_multiplier': new_value})
             else:
                 self._send_json({'error': 'not found'}, 404)
 
@@ -1019,7 +1154,7 @@ def main():
     http_thread.start()
 
     print(f'[server] listening on http://{bind_host}:{bind_port}')
-    print('[server] GET /health, GET /state, POST /save')
+    print('[server] GET /health, GET /state, GET /admin, POST /save, POST /admin/speed_multiplier')
     print('[server] Ctrl+C to save and stop.')
 
     tick_interval = 1.0 / world.tick_rate

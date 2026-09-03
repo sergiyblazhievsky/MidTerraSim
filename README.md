@@ -73,7 +73,7 @@ With coverage:
 python -m pytest --cov=server --cov=chunk --cov-report=term-missing
 ```
 
-Current coverage: **100%** on `chunk.py`, **94%** on `server.py` (the only uncovered lines are `server.py`'s `main()` CLI entrypoint/tick-loop, which isn't practical to exercise as a unit test).
+Current coverage: **100%** on `chunk.py`, **95%** on `server.py` (the only uncovered lines are `server.py`'s `main()` CLI entrypoint/tick-loop, which isn't practical to exercise as a unit test, plus one pre-existing unreachable defensive branch).
 
 What's covered:
 - Config loading/merging/hot-reload (`load_config`, `maybe_reload_config`)
@@ -84,8 +84,9 @@ What's covered:
 - Creature needs/sleep state machine (`_compute_creature_needs`, `_pick_highest_need`, `_act_feed`, `_creature_move`)
 - Daily/seasonal lifecycle (hunger/age decay, winter aging, summer reproduction, removal)
 - The flora simulation cycle (`_sim_step`): decay, season rotation, and tag-driven spawn-blocking rules
-- `tick()` scheduling: day/night transitions, revision counting, periodic save/sim-step triggers, creature movement/sleep timing
-- The full HTTP/JSON API (`/health`, `/state`, `/save`, unknown routes, unsupported methods, concurrent requests, and the `/` inspector page) against a real `ThreadingHTTPServer`
+- `tick()` scheduling: day/night transitions, revision counting, periodic save/sim-step triggers, creature movement/sleep timing, and `speed_multiplier` scaling
+- The admin `speed_multiplier` control (`set_speed_multiplier`, `admin_state`, `_effective_time`) — validation, and its no-op guarantee at the default value of `1`
+- The full HTTP/JSON API (`/health`, `/state`, `/save`, `/admin`, `/admin/speed_multiplier`, unknown routes, unsupported methods, concurrent requests, and the `/` inspector page) against a real `ThreadingHTTPServer`
 
 ## HTTP API (`server.py`)
 
@@ -94,10 +95,12 @@ What's covered:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Human-facing HTML debug page — a collapsible tree of vegetation/creatures/drops (see below) |
+| `/` | GET | Human-facing HTML debug page — a collapsible tree of vegetation/creatures/drops, plus the admin speed control (see below) |
 | `/health` | GET | `{"status": "ok", "revision": <int>}` — cheap liveness/poll check |
 | `/state`  | GET | Full renderable world snapshot (terrain/time, vegetation, creatures, drops) |
+| `/admin`  | GET | Current admin runtime state: `{"speed_multiplier": <int>}` |
 | `/save`   | POST | Force an immediate save to `chunks/chunk_0_0.wrld` |
+| `/admin/speed_multiplier` | POST | Set the runtime speed multiplier, `{"value": <int 1-100>}` |
 
 Open `http://127.0.0.1:8765/` (or your configured host/port) in any browser
 for a live, self-contained inspector page — no build step, no external
@@ -120,6 +123,15 @@ raw stats and the server's currently-computed `needs`:
       ▸ rat #2 ... #5
 ▸ Drops (0)
 ```
+
+An **Admin** panel above the tree lets you change the simulation's
+`speed_multiplier` (`1`–`100`) directly in the browser — useful for testing,
+since at the default `1x` a season change (`season_length × cycle_length`
+seconds) can take tens of minutes in real time. Setting it to e.g. `20`
+speeds up day/night, creature movement/needs, vegetation growth/spawn,
+season rotation, saves, and item-drop aging all together by that factor;
+setting it back to `1` returns to real-time. It's transient admin state —
+not saved to `config.json`, always resets to `1` on server restart.
 
 All snapshot reads and mutations are guarded by a single lock, so concurrent
 client requests never race with the simulation tick — `main.py` is just one

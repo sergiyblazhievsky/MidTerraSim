@@ -126,6 +126,102 @@ def test_maybe_reload_config_handles_missing_config_file_gracefully(world, monke
     assert world.season_length == before_season_length
 
 
+# ── admin: speed multiplier ──────────────────────────────────────────────────
+
+def test_speed_multiplier_defaults_to_one(world):
+    assert world.speed_multiplier == 1
+    assert world.admin_state() == {"speed_multiplier": 1}
+
+
+def test_set_speed_multiplier_accepts_the_full_valid_range(world):
+    assert world.set_speed_multiplier(1) == 1
+    assert world.speed_multiplier == 1
+    assert world.set_speed_multiplier(100) == 100
+    assert world.speed_multiplier == 100
+    assert world.set_speed_multiplier(50) == 50
+    assert world.admin_state() == {"speed_multiplier": 50}
+
+
+def test_set_speed_multiplier_accepts_numeric_strings(world):
+    # HTTP JSON bodies could plausibly send "10" -- int() coerces this fine.
+    assert world.set_speed_multiplier("10") == 10
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 101, 1000])
+def test_set_speed_multiplier_rejects_out_of_range_values(world, bad_value):
+    with pytest.raises(ValueError):
+        world.set_speed_multiplier(bad_value)
+    assert world.speed_multiplier == 1  # unchanged after a rejected update
+
+
+@pytest.mark.parametrize("bad_value", ["fast", None, [1], {}])
+def test_set_speed_multiplier_rejects_non_numeric_values(world, bad_value):
+    with pytest.raises(ValueError):
+        world.set_speed_multiplier(bad_value)
+    assert world.speed_multiplier == 1
+
+
+def test_effective_time_equals_wall_clock_at_default_multiplier(world, monkeypatch):
+    monkeypatch.setattr(server_module.time, "time", lambda: 12345.0)
+    assert world._effective_time() == 12345.0
+
+
+def test_tick_at_default_multiplier_advances_phase_by_real_elapsed_time(world, monkeypatch):
+    fake_now = [0.0]
+    monkeypatch.setattr(server_module.time, "time", lambda: fake_now[0])
+
+    world.tick(dt=1.0)
+    phase_at_t0 = world._phase
+
+    fake_now[0] = 5.0
+    world.tick(dt=1.0)
+    phase_at_t5 = world._phase
+
+    # with speed_multiplier == 1, phase tracks the real wall clock 1:1
+    assert phase_at_t5 - phase_at_t0 == pytest.approx(5.0 / world.day_night_cycle)
+
+
+def test_tick_at_higher_multiplier_advances_phase_faster_than_wall_clock(world, monkeypatch):
+    fake_now = [0.0]
+    monkeypatch.setattr(server_module.time, "time", lambda: fake_now[0])
+    world.set_speed_multiplier(10)
+
+    dt = 1.0
+    fake_now[0] += dt  # 1 real second actually elapsing, consistent with dt
+    world.tick(dt=dt)
+
+    # 1 real second at 10x multiplier -> 10 virtual seconds of phase progress
+    assert world._phase == pytest.approx(10.0 / world.day_night_cycle)
+
+
+def test_tick_at_higher_multiplier_speeds_up_creature_movement_timer(world, monkeypatch):
+    monkeypatch.setattr(server_module.time, "time", lambda: 0.0)  # is_day True
+    ci = 0
+    world.set_speed_multiplier(10)
+    interval = world.creature_defs[ci]["move_interval_day"]
+
+    # a real dt that alone wouldn't reach the interval, but does at 10x speed
+    world.tick(dt=(interval / 10.0) + 0.01)
+
+    assert world._creature_timers[ci] == 0.0  # fired and reset this tick
+
+
+def test_tick_at_higher_multiplier_speeds_up_the_flora_sim_cycle(world, monkeypatch):
+    monkeypatch.setattr(server_module.time, "time", lambda: 0.0)
+    world.set_speed_multiplier(10)
+
+    world.tick(dt=(world.cycle_length / 10.0) + 0.01)
+
+    assert world.current_cycle == 1
+
+
+def test_tick_at_default_multiplier_is_unaffected_by_the_offset_mechanism(world, monkeypatch):
+    # sanity check: the speed_multiplier plumbing must be a true no-op at 1x
+    monkeypatch.setattr(server_module.time, "time", lambda: 0.0)
+    world.tick(dt=1.0)
+    assert world._time_offset == 0.0
+
+
 # ── season application ───────────────────────────────────────────────────────
 
 def test_apply_season_updates_chunk_and_texture(world):

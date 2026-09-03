@@ -38,6 +38,14 @@ def _post_json(url):
         return resp.status, json.loads(resp.read().decode("utf-8"))
 
 
+def _post_json_payload(url, payload):
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, method="POST", data=body,
+                                  headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.status, json.loads(resp.read().decode("utf-8"))
+
+
 def test_health_returns_ok_and_current_revision(running_server):
     base_url, world = running_server
 
@@ -74,6 +82,76 @@ def test_root_serves_the_html_inspector_page(running_server):
     assert "<html" in body.lower()
     assert "Server Inspector" in body
     assert "/state" in body  # the page polls the JSON API client-side
+    assert "/admin/speed_multiplier" in body  # the admin panel posts here
+
+
+def test_admin_get_returns_default_speed_multiplier(running_server):
+    base_url, world = running_server
+
+    status, body = _get_json(f"{base_url}/admin")
+
+    assert status == 200
+    assert body == {"speed_multiplier": 1}
+
+
+def test_admin_post_speed_multiplier_applies_and_persists_in_world(running_server):
+    base_url, world = running_server
+
+    status, body = _post_json_payload(f"{base_url}/admin/speed_multiplier", {"value": 25})
+
+    assert status == 200
+    assert body == {"speed_multiplier": 25}
+    with world.lock:
+        assert world.speed_multiplier == 25
+
+    # subsequent GET /admin reflects the change
+    _, admin_body = _get_json(f"{base_url}/admin")
+    assert admin_body == {"speed_multiplier": 25}
+
+
+def test_admin_post_speed_multiplier_rejects_out_of_range_value(running_server):
+    base_url, world = running_server
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _post_json_payload(f"{base_url}/admin/speed_multiplier", {"value": 101})
+
+    assert exc_info.value.code == 400
+    body = json.loads(exc_info.value.read().decode("utf-8"))
+    assert "error" in body
+    with world.lock:
+        assert world.speed_multiplier == 1  # unchanged
+
+
+def test_admin_post_speed_multiplier_rejects_missing_value_field(running_server):
+    base_url, _ = running_server
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _post_json_payload(f"{base_url}/admin/speed_multiplier", {})
+
+    assert exc_info.value.code == 400
+
+
+def test_admin_post_speed_multiplier_rejects_empty_body(running_server):
+    base_url, _ = running_server
+    req = urllib.request.Request(f"{base_url}/admin/speed_multiplier", method="POST", data=b"")
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req, timeout=5)
+
+    assert exc_info.value.code == 400
+
+
+def test_admin_post_speed_multiplier_rejects_malformed_json_body(running_server):
+    base_url, _ = running_server
+    req = urllib.request.Request(
+        f"{base_url}/admin/speed_multiplier", method="POST",
+        data=b"{not valid json", headers={"Content-Type": "application/json"},
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req, timeout=5)
+
+    assert exc_info.value.code == 400
 
 
 def test_save_forces_a_write_to_the_world_file(running_server, isolated_paths):
