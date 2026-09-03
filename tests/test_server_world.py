@@ -261,6 +261,318 @@ def test_built_burrows_get_unique_increasing_ids(world):
     assert len(set(ids)) == 2
 
 
+# ── stocking the larder ──────────────────────────────────────────────────────
+
+def _housed_rat(world, x, z, home_x=None, home_z=None):
+    """A fed, awake rat at (x, z) with a burrow, i.e. one that will stock."""
+    ci = 0
+    isolate_creature(world, ci, 0)
+    world.all_creature_positions[ci][0] = (x, z)
+    st = world.all_creature_stats[ci][0]
+    st["hunger"] = world.creature_defs[ci]["initial_hunger"]   # feed need 0
+    st["sleep"] = 0.0
+    st["asleep"] = False
+    burrow = world._build_structure(world.structure_defs[0],
+                                    home_x if home_x is not None else x,
+                                    home_z if home_z is not None else z)
+    st["home"] = burrow["id"]
+    st["home_need"] = 0.0
+    return ci, st, burrow
+
+
+def test_stock_need_is_the_constant_from_the_definition(world):
+    cdef = world.creature_defs[0]
+    st = world.all_creature_stats[0][0]
+
+    assert world._compute_creature_needs(cdef, st)["stock"] == 0.9
+
+
+def test_stock_need_stays_constant_regardless_of_state(world):
+    cdef = world.creature_defs[0]
+    st = world.all_creature_stats[0][0]
+    st["hunger"] = 0
+    st["home"] = 4
+
+    assert world._compute_creature_needs(cdef, st)["stock"] == 0.9
+
+
+def test_stock_need_falls_back_to_the_default_for_an_unusable_value(world):
+    assert world._stock_need({"stock_need": "soon"}) == server_module.DEFAULT_STOCK_NEED
+    assert world._stock_need({}) == server_module.DEFAULT_STOCK_NEED
+
+
+def test_rat_and_rabbit_both_declare_the_stock_need(world):
+    for cdef in world.creature_defs:
+        assert "stock" in cdef["needs"]
+        assert cdef["stock_need"] == 0.9
+
+
+def test_hunger_outranks_stocking(world):
+    # feed is >= 1 whenever the creature is at all hungry, stock is 0.9.
+    cdef = world.creature_defs[0]
+    st = world.all_creature_stats[0][0]
+    st["hunger"] = cdef["initial_hunger"] - 1
+
+    assert world._ranked_needs(world._compute_creature_needs(cdef, st))[0] == "feed"
+
+
+def test_stocking_outranks_a_home_want_that_has_only_just_started(world):
+    cdef = world.creature_defs[0]
+    st = world.all_creature_stats[0][0]
+    st["hunger"] = cdef["initial_hunger"]
+    st["home_need"] = 0.5     # one day homeless
+
+    assert world._ranked_needs(world._compute_creature_needs(cdef, st))[0] == "stock"
+
+
+def test_a_long_homeless_creature_prefers_digging_to_stocking(world):
+    cdef = world.creature_defs[0]
+    st = world.all_creature_stats[0][0]
+    st["hunger"] = cdef["initial_hunger"]
+    st["home_need"] = 1.0     # two days homeless
+
+    assert world._ranked_needs(world._compute_creature_needs(cdef, st))[0] == "home"
+
+
+def test_act_stock_picks_up_a_drop_on_the_current_tile(world):
+    ci, st, _ = _housed_rat(world, 5, 5)
+    world._spawn_drop("berry", 2, 5, 5)
+
+    result = world._act_stock(ci, 0, world.creature_defs[ci], 5, 5, avoids=set())
+
+    assert result == (5, 5)              # stays put to pick up
+    assert st["carrying"] == "berry"
+    assert world.world_drops[0]["count"] == 1   # took exactly one
+
+
+def test_picking_up_the_last_of_a_drop_clears_it_from_the_world(world):
+    ci, st, _ = _housed_rat(world, 5, 5)
+    world._spawn_drop("berry", 1, 5, 5)
+
+    world._act_stock(ci, 0, world.creature_defs[ci], 5, 5, avoids=set())
+
+    assert st["carrying"] == "berry"
+    assert world.world_drops == []
+
+
+def test_act_stock_steps_toward_a_drop_within_feed_radius(world):
+    ci, st, _ = _housed_rat(world, 1, 1)
+    world._spawn_drop("berry", 1, 4, 1)   # 3 tiles away, feed_radius is 5
+
+    result = world._act_stock(ci, 0, world.creature_defs[ci], 1, 1, avoids=set())
+
+    assert result == (2, 1)               # closed the distance
+    assert st["carrying"] is None         # nothing picked up yet
+
+
+def test_act_stock_declines_when_the_nearest_drop_is_out_of_range(world):
+    ci, st, _ = _housed_rat(world, 0, 0)
+    world._spawn_drop("berry", 1, 5, 5)   # 10 tiles away, feed_radius is 5
+
+    assert world._act_stock(ci, 0, world.creature_defs[ci], 0, 0, avoids=set()) is None
+    assert st["carrying"] is None
+
+
+def test_act_stock_declines_when_nothing_edible_is_around(world):
+    ci, st, _ = _housed_rat(world, 5, 5)
+    world._spawn_drop("log", 1, 5, 5)     # not in the rat's food diet
+
+    assert world._act_stock(ci, 0, world.creature_defs[ci], 5, 5, avoids=set()) is None
+    assert st["carrying"] is None
+    assert len(world.world_drops) == 1    # left where it lay
+
+
+def test_act_stock_declines_when_the_creature_has_no_burrow(world):
+    ci = 0
+    isolate_creature(world, ci, 0)
+    st = world.all_creature_stats[ci][0]
+    st["home"] = None
+    world._spawn_drop("berry", 1, 5, 5)
+
+    assert world._act_stock(ci, 0, world.creature_defs[ci], 5, 5, avoids=set()) is None
+    assert st["carrying"] is None
+
+
+def test_act_stock_declines_when_its_burrow_has_collapsed(world):
+    ci, st, burrow = _housed_rat(world, 5, 5)
+    world.world_structures.clear()        # burrow gone, stale id left behind
+    world._spawn_drop("berry", 1, 5, 5)
+
+    assert world._act_stock(ci, 0, world.creature_defs[ci], 5, 5, avoids=set()) is None
+
+
+def test_a_herbivore_never_stocks_because_its_diet_holds_no_items(world):
+    # The rabbit eats grass and bushes, neither of which is a carryable item,
+    # so its stock turn always declines and it moves on to the next need.
+    ci = 1
+    rabbit = world.creature_defs[ci]
+    world._spawn_drop("berry", 1, 2, 2)
+
+    assert world._resolve_diet(rabbit) == set()
+    assert world._pick_up_drop_at(2, 2, rabbit) is None
+    assert world._act_stock(ci, 0, rabbit, 2, 2, avoids=set()) is None
+
+
+def test_act_on_need_ignores_a_task_it_has_no_behavior_for(world):
+    assert world._act_on_need("thirst", 0, 0, world.creature_defs[0],
+                              1, 1, avoids=set()) is None
+
+
+def test_a_blocked_hauler_holds_its_ground_and_keeps_the_item(world):
+    ci, st, _ = _housed_rat(world, 1, 1, home_x=4, home_z=1)
+    st["carrying"] = "berry"
+    for bx, bz in [(0, 1), (2, 1), (1, 0), (1, 2)]:
+        world.chunk.set_block(bx, world.SY, bz, TREE)
+
+    result = world._creature_move(ci, 0, world.creature_defs[ci], 1, 1,
+                                  avoids={TREE})
+
+    assert result == (1, 1)
+    assert st["carrying"] == "berry"      # still holding it, tries again later
+
+
+def test_a_declined_stock_turn_hands_over_to_the_next_need(world):
+    # Nothing to hoard, so the creature should dig instead of standing idle.
+    ci = 0
+    isolate_creature(world, ci, 0)
+    st = world.all_creature_stats[ci][0]
+    st["hunger"] = world.creature_defs[ci]["initial_hunger"]
+    st["sleep"] = 0.0
+    st["home"] = None
+    st["home_need"] = 0.5                 # ranked below stock's 0.9
+
+    result = world._creature_move(ci, 0, world.creature_defs[ci], 4, 4, avoids=set())
+
+    assert result == (4, 4)
+    assert len(world.world_structures) == 1
+    assert st["home"] == world.world_structures[0]["id"]
+
+
+# ── stocking: hauling it home ────────────────────────────────────────────────
+
+def test_a_carrying_creature_heads_home_instead_of_weighing_needs(world):
+    ci, st, burrow = _housed_rat(world, 1, 1, home_x=4, home_z=1)
+    st["carrying"] = "berry"
+    st["hunger"] = 0                      # starving, and it still won't stop
+    st["sleep"] = 5.0
+
+    result = world._creature_move(ci, 0, world.creature_defs[ci], 1, 1, avoids=set())
+
+    assert result == (2, 1)               # a step toward the burrow at (4, 1)
+    assert st["asleep"] is False
+    assert st["carrying"] == "berry"
+
+
+def test_arriving_at_the_burrow_stashes_the_carried_item(world):
+    ci, st, burrow = _housed_rat(world, 3, 1, home_x=4, home_z=1)
+    st["carrying"] = "berry"
+
+    result = world._creature_move(ci, 0, world.creature_defs[ci], 3, 1, avoids=set())
+
+    assert result == (4, 1)
+    assert st["carrying"] is None
+    assert burrow["contains"] == [{"item": "berry", "count": 1}]
+
+
+def test_standing_on_the_burrow_while_loaded_stashes_immediately(world):
+    ci, st, burrow = _housed_rat(world, 5, 5)
+    st["carrying"] = "seed"
+
+    result = world._creature_move(ci, 0, world.creature_defs[ci], 5, 5, avoids=set())
+
+    assert result == (5, 5)
+    assert st["carrying"] is None
+    assert burrow["contains"] == [{"item": "seed", "count": 1}]
+
+
+def test_stashing_the_same_item_twice_stacks_it(world):
+    ci, st, burrow = _housed_rat(world, 5, 5)
+    st["carrying"] = "berry"
+    world._creature_move(ci, 0, world.creature_defs[ci], 5, 5, avoids=set())
+    st["carrying"] = "berry"
+    world._creature_move(ci, 0, world.creature_defs[ci], 5, 5, avoids=set())
+
+    assert burrow["contains"] == [{"item": "berry", "count": 2}]
+
+
+def test_stashing_a_different_item_adds_a_second_entry(world):
+    ci, st, burrow = _housed_rat(world, 5, 5)
+    st["carrying"] = "berry"
+    world._creature_move(ci, 0, world.creature_defs[ci], 5, 5, avoids=set())
+    st["carrying"] = "seed"
+    world._creature_move(ci, 0, world.creature_defs[ci], 5, 5, avoids=set())
+
+    assert burrow["contains"] == [{"item": "berry", "count": 1},
+                                  {"item": "seed", "count": 1}]
+
+
+def test_stashing_bumps_the_structure_revision(world):
+    ci, st, _ = _housed_rat(world, 5, 5)
+    st["carrying"] = "berry"
+    before = world.structure_revision
+
+    world._creature_move(ci, 0, world.creature_defs[ci], 5, 5, avoids=set())
+
+    assert world.structure_revision > before
+
+
+def test_losing_the_burrow_mid_haul_puts_the_item_back_on_the_ground(world):
+    ci, st, _ = _housed_rat(world, 1, 1, home_x=4, home_z=1)
+    st["carrying"] = "berry"
+    world.world_structures.clear()
+
+    result = world._creature_move(ci, 0, world.creature_defs[ci], 1, 1, avoids=set())
+
+    assert result == (1, 1)
+    assert st["carrying"] is None
+    assert [(d["item"], d["count"], d["x"], d["z"]) for d in world.world_drops] == [
+        ("berry", 1, 1, 1)]
+
+
+def test_a_creature_that_dies_carrying_something_drops_it(world):
+    ci, st, _ = _housed_rat(world, 5, 5)
+    st["carrying"] = "berry"
+
+    world._remove_creature(ci, 0)
+
+    assert ("berry", 1) in [(d["item"], d["count"]) for d in world.world_drops]
+
+
+def test_the_carried_item_survives_a_reload(world):
+    ci, st, _ = _housed_rat(world, 1, 1, home_x=4, home_z=1)
+    st["carrying"] = "berry"
+
+    world.save()
+    reloaded = server_module.World()
+
+    assert any(s.get("carrying") == "berry"
+               for s in reloaded.all_creature_stats[ci])
+
+
+def test_a_stashed_larder_survives_a_reload(world):
+    ci, st, burrow = _housed_rat(world, 5, 5)
+    st["carrying"] = "berry"
+    world._creature_move(ci, 0, world.creature_defs[ci], 5, 5, avoids=set())
+
+    world.save()
+    reloaded = server_module.World()
+
+    assert reloaded.world_structures[0]["contains"] == [
+        {"item": "berry", "count": 1}]
+
+
+def test_snapshot_reports_what_a_creature_is_carrying(world):
+    ci, st, _ = _housed_rat(world, 5, 5)
+    st["carrying"] = "berry"
+
+    snap = world.snapshot()
+
+    c = next(c for c in snap["creatures"] if c["id"] == st["id"])
+    assert c["carrying"] == "berry"
+    assert all(other["carrying"] is None
+               for other in snap["creatures"] if other["id"] != st["id"])
+
+
 # ── structures: weathering at season start ───────────────────────────────────
 
 def test_break_structures_damages_a_burrow_when_the_roll_succeeds(world, monkeypatch):
@@ -561,6 +873,7 @@ def test_fauna_is_restored_from_the_world_file_instead_of_reseeded(world):
     world.all_creature_stats[ci] = [{
         "id": 42, "age": 1, "hunger": 2, "attack": 5,
         "sleep": 0.5, "asleep": True, "home": None, "home_need": 1.5,
+        "carrying": None,
     }]
 
     world.save()
@@ -570,6 +883,7 @@ def test_fauna_is_restored_from_the_world_file_instead_of_reseeded(world):
     assert reloaded.all_creature_stats[ci] == [{
         "id": 42, "age": 1, "hunger": 2, "attack": 5,
         "sleep": 0.5, "asleep": True, "home": None, "home_need": 1.5,
+        "carrying": None,
     }]
 
 
@@ -621,6 +935,7 @@ def test_save_writes_live_fauna_into_the_world_file(world, isolated_paths):
     world.all_creature_stats[ci] = [{
         "id": 7, "age": 2, "hunger": 1, "attack": 5,
         "sleep": 0.0, "asleep": False, "home": 3, "home_need": 0.0,
+        "carrying": "berry",
     }]
 
     world.save()
@@ -629,7 +944,7 @@ def test_save_writes_live_fauna_into_the_world_file(world, isolated_paths):
     assert raw["creatures"]["rat"] == [{
         "id": 7, "x": 4, "z": 5, "age": 2, "hunger": 1,
         "attack": 5, "sleep": 0.0, "asleep": False,
-        "home": 3, "home_need": 0.0,
+        "home": 3, "home_need": 0.0, "carrying": "berry",
     }]
     assert raw["next_creature_id"] >= 7
 
@@ -894,6 +1209,38 @@ def test_update_drops_picked_up_by_adjacent_hungry_creature(world):
 
     assert world.world_drops == []
     assert world.all_creature_stats[ci][0]["hunger"] == 2  # gained 2 x hunger_per_food(1)
+
+
+def test_update_drops_left_alone_by_an_adjacent_full_creature(world):
+    # A creature that can't eat any of it must not consume the stack -- and a
+    # stocking creature is full by definition, so this is the normal case for
+    # anything hauling food home.
+    ci = 0
+    isolate_creature(world, ci, 0)
+    world.all_creature_positions[ci][0] = (0, 0)
+    world.all_creature_stats[ci][0]["hunger"] = world.creature_defs[ci]["initial_hunger"]
+    world.all_creature_stats[ci][0]["asleep"] = False
+    world._spawn_drop("seed", 2, 1, 0)
+
+    world._update_drops()
+
+    assert len(world.world_drops) == 1
+    assert world.world_drops[0]["count"] == 2
+
+
+def test_update_drops_leaves_the_remainder_of_a_partly_eaten_stack(world):
+    ci = 0
+    isolate_creature(world, ci, 0)
+    world.all_creature_positions[ci][0] = (0, 0)
+    cdef = world.creature_defs[ci]
+    world.all_creature_stats[ci][0]["hunger"] = cdef["initial_hunger"] - 1
+    world.all_creature_stats[ci][0]["asleep"] = False
+    world._spawn_drop("seed", 3, 1, 0)    # only room for one
+
+    world._update_drops()
+
+    assert world.all_creature_stats[ci][0]["hunger"] == cdef["initial_hunger"]
+    assert world.world_drops[0]["count"] == 2
 
 
 def test_update_drops_not_picked_up_by_sleeping_creature(world):
@@ -1373,14 +1720,20 @@ def test_compute_creature_needs_sleep_reads_as_zero_while_already_asleep(world):
     assert needs["sleep"] == 0
 
 
-def test_pick_highest_need_selects_the_max_value(world):
-    assert world._pick_highest_need({"feed": 2, "sleep": 0.5}) == "feed"
-    assert world._pick_highest_need({"feed": 0.2, "sleep": 0.9}) == "sleep"
+def test_ranked_needs_orders_by_value_strongest_first(world):
+    assert world._ranked_needs({"feed": 2, "sleep": 0.5}) == ["feed", "sleep"]
+    assert world._ranked_needs({"feed": 0.2, "sleep": 0.9}) == ["sleep", "feed"]
 
 
-def test_pick_highest_need_none_when_all_zero_or_empty(world):
-    assert world._pick_highest_need({"feed": 0, "sleep": 0}) is None
-    assert world._pick_highest_need({}) is None
+def test_ranked_needs_drops_anything_not_worth_acting_on(world):
+    assert world._ranked_needs({"feed": 0, "sleep": 0}) == []
+    assert world._ranked_needs({}) == []
+    assert world._ranked_needs({"feed": 0, "stock": 0.9}) == ["stock"]
+
+
+def test_ranked_needs_breaks_ties_in_declared_order(world):
+    assert world._ranked_needs({"sleep": 0.9, "stock": 0.9}) == ["sleep", "stock"]
+    assert world._ranked_needs({"stock": 0.9, "sleep": 0.9}) == ["stock", "sleep"]
 
 
 def test_wake_and_sleep_creature_toggle_state(world):
@@ -1905,7 +2258,7 @@ def test_snapshot_creatures_have_stable_ids_and_expected_fields(world):
     assert len(snap["creatures"]) == total
     c = next(c for c in snap["creatures"] if c["type"] == "rat")
     assert set(c.keys()) == {"id", "type", "x", "z", "age", "hunger", "sleep",
-                             "asleep", "home", "needs"}
+                             "asleep", "home", "carrying", "needs"}
     assert any(c["type"] == "rabbit" for c in snap["creatures"])
 
 
@@ -1918,8 +2271,9 @@ def test_snapshot_creatures_include_computed_needs(world):
     snap = world.snapshot()
 
     c = next(c for c in snap["creatures"] if c["id"] == world.all_creature_stats[ci][0]["id"])
-    # feed is initial_hunger(3) - hunger(1); home is 0 until it accrues at day start
-    assert c["needs"] == {"feed": 2, "sleep": 0.5, "home": 0.0}
+    # feed is initial_hunger(3) - hunger(1); home is 0 until it accrues at day
+    # start; stock is the constant from the definition
+    assert c["needs"] == {"feed": 2, "sleep": 0.5, "home": 0.0, "stock": 0.9}
 
 
 def test_snapshot_drops_include_a_computed_age_in_seconds(world):

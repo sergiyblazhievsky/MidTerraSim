@@ -44,6 +44,7 @@ DAY_FRACTION = 40.0 / 60.0
 # How far a hungry creature looks for food when its entities.json definition
 # doesn't say (`feed_radius`). Manhattan tiles.
 DEFAULT_FEED_RADIUS = 5
+DEFAULT_STOCK_NEED = 0.9
 
 DEFAULT_CONFIG = {
     'cycle_length': 300.0,
@@ -370,6 +371,7 @@ class World:
             'asleep': False,
             'home': None,
             'home_need': 0.0,
+            'carrying': None,
         }
 
     def _seed_creatures(self):
@@ -395,6 +397,7 @@ class World:
                 'asleep': inst.get('asleep', False),
                 'home': inst.get('home'),
                 'home_need': inst.get('home_need', 0.0),
+                'carrying': inst.get('carrying'),
             })
         return positions, stats
 
@@ -428,6 +431,7 @@ class World:
                     'asleep': bool(st.get('asleep', False)),
                     'home': st.get('home'),
                     'home_need': float(st.get('home_need', 0.0)),
+                    'carrying': st.get('carrying'),
                 }
                 for (x, z), st in zip(self.all_creature_positions[ci],
                                       self.all_creature_stats[ci])
@@ -489,6 +493,14 @@ class World:
         """The structure occupying this tile, if any -- only one may."""
         for s in self.world_structures:
             if s['x'] == x and s['z'] == z:
+                return s
+        return None
+
+    def _structure_by_id(self, structure_id):
+        if structure_id is None:
+            return None
+        for s in self.world_structures:
+            if s['id'] == structure_id:
                 return s
         return None
 
@@ -558,6 +570,7 @@ class World:
     def _remove_creature(self, ci, i):
         cdef = self.creature_defs[ci]
         x, z = self.all_creature_positions[ci][i]
+        self._drop_carried(ci, i, x, z)
         self._drop_from(cdef, x, z)
         del self.all_creature_positions[ci][i]
         del self.all_creature_stats[ci][i]
@@ -611,14 +624,20 @@ class World:
                         while gained < drop['count'] and stats[i]['hunger'] < max_hunger:
                             stats[i]['hunger'] += hunger_gain
                             gained += 1
-                        print(f'[pickup] {cdef["name"]}#{i} picked up {drop["count"]}x {drop["item"]} '
+                        # A creature that ate nothing (already full) leaves the
+                        # drop alone, and one that ate part of a stack leaves
+                        # the rest -- same rule as eating deliberately.
+                        if gained == 0:
+                            continue
+                        drop['count'] -= gained
+                        print(f'[pickup] {cdef["name"]}#{i} picked up {gained}x {drop["item"]} '
                               f'at ({drop["x"]},{drop["z"]}) hunger={stats[i]["hunger"]}')
                         picked_up = True
                         break
                 if picked_up:
                     break
 
-            if picked_up:
+            if drop['count'] <= 0:
                 to_discard.append(idx)
 
         for idx in reversed(to_discard):
@@ -879,14 +898,28 @@ class World:
                 # Satisfied outright while it has somewhere to dwell; the want
                 # only accrues (at day start) while homeless.
                 needs['home'] = 0 if st.get('home') else st.get('home_need', 0.0)
+            elif need == 'stock':
+                # Constant, unlike the others: hoarding is never satisfied and
+                # never urgent. Its value only decides where it sits in the
+                # pecking order -- below any real hunger (>= 1), above a home
+                # want that hasn't had a couple of days to build up.
+                needs['stock'] = self._stock_need(cdef)
         return needs
 
     @staticmethod
-    def _pick_highest_need(needs):
-        if not needs:
-            return None
-        task, value = max(needs.items(), key=lambda kv: kv[1])
-        return task if value > 0 else None
+    def _stock_need(cdef):
+        try:
+            return float(cdef.get('stock_need', DEFAULT_STOCK_NEED))
+        except (TypeError, ValueError):
+            return DEFAULT_STOCK_NEED
+
+    @staticmethod
+    def _ranked_needs(needs):
+        """Tasks worth acting on, strongest first. Ties keep the order they
+        were declared in. A task may decline the turn (return None) and hand
+        over to the next one down -- see `_act_stock`."""
+        ranked = sorted(needs.items(), key=lambda kv: kv[1], reverse=True)
+        return [task for task, value in ranked if value > 0]
 
     def _wake_creature(self, ci, i, cdef):
         st = self.all_creature_stats[ci][i]
@@ -928,10 +961,102 @@ class World:
               f'{structure["type"]}#{structure["id"]} at ({x},{z})')
         return (x, z)
 
+    # ── stocking the larder ───────────────────────────────────────────────
+    def _pick_up_drop_at(self, x, z, cdef):
+        """Take a single item off an edible drop on this tile. Returns the item
+        name, or None if there's nothing here this creature would hoard."""
+        edible = self._resolve_diet(cdef)
+        if not edible:
+            return None
+        for idx, drop in enumerate(self.world_drops):
+            if drop['item'] not in edible or drop['x'] != x or drop['z'] != z:
+                continue
+            drop['count'] -= 1
+            if drop['count'] <= 0:
+                del self.world_drops[idx]
+            return drop['item']
+        return None
+
+    def _act_stock(self, ci, i, cdef, x, z, avoids):
+        """Fetch one edible drop back to the larder. Returns None to decline
+        the turn -- with no home to stock or nothing in reach worth carrying,
+        the creature should get on with its next need instead."""
+        st = self.all_creature_stats[ci][i]
+        if self._structure_by_id(st.get('home')) is None:
+            return None
+
+        item = self._pick_up_drop_at(x, z, cdef)
+        if item:
+            st['carrying'] = item
+            print(f'[stock] {cdef["name"]}#{st["id"]} picked up {item} '
+                  f'at ({x},{z})')
+            return (x, z)
+
+        target = self._find_nearest_food_drop(x, z, cdef, self._feed_radius(cdef))
+        if not target:
+            return None
+        step = self._step_toward(x, z, target[0], target[1], avoids)
+        return step if step else (x, z)
+
+    def _stash_carried(self, ci, i, cdef, structure):
+        """Move the carried item off the creature and into the larder."""
+        st = self.all_creature_stats[ci][i]
+        item = st.get('carrying')
+        st['carrying'] = None
+        for entry in structure['contains']:
+            if entry['item'] == item:
+                entry['count'] += 1
+                break
+        else:
+            structure['contains'].append({'item': item, 'count': 1})
+        self.structure_revision += 1
+        print(f'[stock] {cdef["name"]}#{st["id"]} stashed {item} in '
+              f'{structure["type"]}#{structure["id"]}')
+
+    def _drop_carried(self, ci, i, x, z):
+        """Put the carried item back on the ground -- the creature died, or
+        lost the home it was hauling towards."""
+        st = self.all_creature_stats[ci][i]
+        item = st.get('carrying')
+        st['carrying'] = None
+        if item:
+            self._spawn_drop(item, 1, x, z)
+
+    def _act_deliver(self, ci, i, cdef, x, z, avoids):
+        """Haul the carried item home. Runs instead of the needs pass, so a
+        loaded creature won't stop to eat, sleep or dig on the way."""
+        st = self.all_creature_stats[ci][i]
+        structure = self._structure_by_id(st.get('home'))
+        if structure is None:
+            # Home collapsed mid-haul; put it down rather than carry forever.
+            self._drop_carried(ci, i, x, z)
+            return (x, z)
+
+        if (x, z) == (structure['x'], structure['z']):
+            self._stash_carried(ci, i, cdef, structure)
+            return (x, z)
+
+        step = self._step_toward(x, z, structure['x'], structure['z'], avoids)
+        if not step:
+            return (x, z)
+        if step == (structure['x'], structure['z']):
+            self._stash_carried(ci, i, cdef, structure)
+        return step
+
     def _creature_move(self, ci, i, cdef, x, z, avoids):
         st = self.all_creature_stats[ci][i]
+        if st.get('carrying'):
+            return self._act_deliver(ci, i, cdef, x, z, avoids)
+
         needs = self._compute_creature_needs(cdef, st)
-        task = self._pick_highest_need(needs)
+        for task in self._ranked_needs(needs):
+            moved = self._act_on_need(task, ci, i, cdef, x, z, avoids)
+            if moved is not None:
+                return moved
+        return self._move_creature_random(x, z, avoids)
+
+    def _act_on_need(self, task, ci, i, cdef, x, z, avoids):
+        """Run one need's behavior. None means "declined, try the next need"."""
         if task == 'sleep':
             self._sleep_creature(ci, i, cdef)
             return (x, z)
@@ -939,7 +1064,9 @@ class World:
             return self._act_feed(ci, i, cdef, x, z, avoids)
         if task == 'home':
             return self._act_home(ci, i, cdef, x, z, avoids)
-        return self._move_creature_random(x, z, avoids)
+        if task == 'stock':
+            return self._act_stock(ci, i, cdef, x, z, avoids)
+        return None
 
     # ── daily / seasonal lifecycle ────────────────────────────────────────
     def _on_day_start(self):
@@ -1204,6 +1331,7 @@ class World:
                     'sleep': st.get('sleep', 0.0),
                     'asleep': st.get('asleep', False),
                     'home': st.get('home'),
+                    'carrying': st.get('carrying'),
                     'needs': self._compute_creature_needs(cdef, st),
                 })
 
@@ -1379,6 +1507,7 @@ INSPECTOR_HTML = """<!doctype html>
         cinner += leaf(`<span class="kv">sleep</span>: ${c.sleep}`);
         cinner += leaf(`<span class="kv">asleep</span>: ${c.asleep}`);
         cinner += leaf(`<span class="kv">home</span>: ${c.home === null || c.home === undefined ? '&mdash;' : '#' + c.home}`);
+        cinner += leaf(`<span class="kv">carrying</span>: ${c.carrying ? esc(c.carrying) : '&mdash;'}`);
         cinner += renderNeeds(ikey, c.needs);
         inner += details(ikey, `${name} #${c.id}`, undefined, cinner);
       }
@@ -1400,7 +1529,7 @@ INSPECTOR_HTML = """<!doctype html>
         sinner += leaf(`<span class="kv">position</span>: (${s.x}, ${s.z})`);
         sinner += leaf(`<span class="kv">age</span>: ${s.age}`);
         sinner += leaf(`<span class="kv">dwellers</span>: ${dwellers.length ? dwellers.map(c => esc(c.type) + ' #' + c.id).join(', ') : '&mdash;'}`);
-        sinner += leaf(`<span class="kv">contains</span>: ${s.contains && s.contains.length ? esc(JSON.stringify(s.contains)) : '&mdash;'}`);
+        sinner += leaf(`<span class="kv">contains</span>: ${s.contains && s.contains.length ? esc(s.contains.map(e => e.count + 'x ' + e.item).join(', ')) : '&mdash;'}`);
         inner += details(`structure:${name}:${s.id}`, `${name} #${s.id}`, undefined, sinner);
       }
       html += details(`structure:${name}`, name, items.length, inner);

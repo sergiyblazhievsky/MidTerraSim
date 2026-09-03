@@ -80,9 +80,12 @@ the ground and driven by the creature `home` need -- see `_act_home` /
 - [x] **Burrows** -- rats and rabbits dig or adopt one where they stand when
   the `home` need wins, share it freely, and are evicted when a season
   finally collapses it (`initial_age` + `break_chance`).
-- [ ] **Stock the burrow larder** -- the `contains` field persists but
-  nothing fills it; dwellers should haul food home to preserve it, and
-  presumably eat from it when hungry.
+- [x] **Stock the burrow larder** -- the `stock` need sends a fed, housed
+  creature to fetch one edible drop within `feed_radius` and haul it back
+  into the burrow's `contains`.
+- [ ] **Eat from the larder** -- stocking only fills it; nothing draws on it
+  yet, so a stocked burrow doesn't help its dwellers survive a lean winter.
+  The obvious counterpart to the `stock` need.
 - [ ] **Actually use the burrow** -- sleeping and reproducing inside it
   rather than wherever the creature happens to stand, which would also give
   the `home` need a payoff beyond being satisfied.

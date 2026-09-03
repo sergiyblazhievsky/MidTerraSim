@@ -118,7 +118,7 @@ per second and renders a collapsible tree:
           position: (7, 11)
           age: 2
           dwellers: rat #1
-          contains: —
+          contains: 3x berry
 ▾ Creatures (5)
   ▾ rat (5)
       ▾ rat #1
@@ -128,10 +128,12 @@ per second and renders a collapsible tree:
           sleep: 0
           asleep: false
           home: #1
-        ▾ needs (3)
+          carrying: berry
+        ▾ needs (4)
             feed: 0
             sleep: 0
             home: 0
+            stock: 0.9
       ▸ rat #2 ... #5
 ▸ Drops (0)
 ```
@@ -269,12 +271,14 @@ are plain JSON numbers (ints unless noted); all coordinates are integers.
     { "x": 12, "z": 7, "block_id": 2, "type": "flower", "age": 1 }
   ],
   "structures": [
-    { "id": 1, "type": "burrow", "x": 7, "z": 11, "age": 2, "contains": [] }
+    { "id": 1, "type": "burrow", "x": 7, "z": 11, "age": 2,
+      "contains": [{ "item": "berry", "count": 3 }] }
   ],
   "creatures": [
     { "id": 3, "type": "rat", "x": 10, "z": 44,
-      "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false, "home": 1,
-      "needs": { "feed": 1, "sleep": 0.5, "home": 0 } }
+      "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false,
+      "home": 1, "carrying": null,
+      "needs": { "feed": 1, "sleep": 0.5, "home": 0, "stock": 0.9 } }
   ],
   "drops": [
     { "id": 9, "item": "berry", "count": 2, "x": 5, "z": 5, "age": 3.2 }
@@ -350,7 +354,8 @@ vegetation exists, not to world size.
 ### `structures[]` — one entry per standing structure
 
 ```json
-{ "id": 1, "type": "burrow", "x": 7, "z": 11, "age": 2, "contains": [] }
+{ "id": 1, "type": "burrow", "x": 7, "z": 11, "age": 2,
+  "contains": [{ "item": "berry", "count": 3 }] }
 ```
 
 | Field | Type | Semantics |
@@ -359,7 +364,7 @@ vegetation exists, not to world size.
 | `type` | string | Structure definition name from [`entities.json`](./entities.json)'s `structures[]` (currently only `"burrow"`) — look it up for `texture`/`render` metadata |
 | `x`, `z` | int | Tile position. **At most one structure per tile**, so `(x, z)` is also unique across this array. |
 | `age` | int | Remaining seasonal hits it can survive. Each season start it has a `break_chance` of losing 1; at `0` it collapses and disappears from this array. |
-| `contains` | array | The dwellers' larder. Reserved for creatures stashing food — persisted across saves, but nothing writes to it yet, so expect `[]`. |
+| `contains` | array | The dwellers' larder: `{"item": string, "count": int}` entries, stacked by item name. Dwellers acting on their `stock` need haul one item at a time in here (see `creatures[].carrying`); nothing consumes it yet, so it only grows. Persisted. |
 
 Structures are **not** terrain blocks: they sit on a tile alongside whatever
 vegetation is there. Render them as a surface texture *above* the ground and
@@ -374,8 +379,9 @@ Who lives in one isn't on the structure — read it from the other direction via
 
 ```json
 { "id": 3, "type": "rat", "x": 10, "z": 44,
-  "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false, "home": 1,
-  "needs": { "feed": 1, "sleep": 0.5, "home": 0 } }
+  "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false,
+  "home": 1, "carrying": "berry",
+  "needs": { "feed": 1, "sleep": 0.5, "home": 0, "stock": 0.9 } }
 ```
 
 | Field | Type | Semantics |
@@ -388,7 +394,8 @@ Who lives in one isn't on the structure — read it from the other direction via
 | `sleep` | float | Current sleep-need accumulator. **Not capped/thresholded** — it just competes against `feed` need for priority each move tick; resets to `0.0` at dawn or immediately on waking. Present (defaulting to `0.0`) even for creature types that don't define a `sleep` need. |
 | `asleep` | bool | `true` while the creature has chosen to sleep (stops moving at night); always resets to `false` at dawn. Client should swap to the definition's `sleep_texture` while this is `true` (see §9). |
 | `home` | int \| `null` | The `structures[].id` this creature dwells in, or `null` while homeless. Several creatures may share one id. Persisted, and cleared automatically if that structure collapses — so an id here always matches an entry in `structures[]` within the same snapshot. |
-| `needs` | object | The server's **currently computed** need→priority map for this instance (same values `_creature_move` uses to decide behavior this tick), keyed by whichever needs are listed in the creature's `entities.json` definition (e.g. `{"feed": 1, "sleep": 0.5, "home": 0}`). `feed` is `max(0, initial_hunger - hunger)`; `sleep` mirrors the `sleep` field but reads as `0` while `asleep` is `true`; `home` is the accrued want for shelter, reading `0` whenever `home` is set. A creature with no configured needs reports `{}`. This is derived/informational — you don't need it to render the world, only to inspect *why* a creature is behaving a certain way (see the `/` inspector page, §4a). |
+| `carrying` | string \| `null` | The item name this creature is hauling back to its burrow, or `null` (the common case). While set, the creature ignores every need until it reaches `home` and stashes the item — so a creature with `carrying` won't eat or sleep no matter what `needs` says. The item exists *only* here: it's already off the ground and not yet in the burrow, so it appears in neither `drops[]` nor `contains`. Optional to render; a small icon over the creature is the intended use. Persisted. |
+| `needs` | object | The server's **currently computed** need→priority map for this instance (the values `_creature_move` ranks to decide behavior this tick), keyed by whichever needs are listed in the creature's `entities.json` definition (e.g. `{"feed": 1, "sleep": 0.5, "home": 0, "stock": 0.9}`). `feed` is `max(0, initial_hunger - hunger)`; `sleep` mirrors the `sleep` field but reads as `0` while `asleep` is `true`; `home` is the accrued want for shelter, reading `0` whenever `home` is set; `stock` is a constant (`0.9`) that only serves to rank hoarding between the two. Highest wins, but a task with nothing to do (no drop in reach to hoard) passes and the next-highest runs instead — so the top need here isn't always the one being acted on. A creature with no configured needs reports `{}`. This is derived/informational — you don't need it to render the world, only to inspect *why* a creature is behaving a certain way (see the `/` inspector page, §4a). |
 
 Creatures never appear/disappear mid-array-shuffle — entries are only added
 (birth on each season change) or removed (death from starvation/old age/winter) between
@@ -404,9 +411,9 @@ snapshots; existing IDs' fields update in place.
 |-------|------|-----------|
 | `id` | int | Stable per-instance identifier (same guarantees as `creatures[].id`), assigned at drop spawn time; resets on server restart |
 | `item` | string | Item definition name from `entities.json`'s `items[]` (`"seed"`, `"berry"`, `"meat"`, `"log"`, `"stick"`) — look this up for the item's `texture`/`tags` |
-| `count` | int | Number of stacked units at this position (a single drop entity can represent multiple units, e.g. `"count": 2` berries) |
+| `count` | int | Number of stacked units at this position (a single drop entity can represent multiple units, e.g. `"count": 2` berries). It can **shrink between polls** while keeping the same `id`: a creature eats only as much as it has room for, and a creature stocking its burrow takes exactly one unit per trip. The entry disappears when the last unit goes. |
 | `x`, `z` | int | Ground tile position |
-| `age` | float | **Seconds of effective (speed-multiplier-scaled) time since this drop spawned**, computed fresh on every `/state` call as `now - spawn_time` where both use the same `effective_time` as `time.phase` (see §4b) — this value keeps increasing between polls even though the underlying drop object doesn't otherwise change, and it is **not** wall-clock-continuous the way real elapsed time is if `speed_multiplier != 1` (see §10 for local extrapolation). Drops are removed once `age >= drop_lifetime` (from `config.json`) or once eaten by a creature. |
+| `age` | float | **Seconds of effective (speed-multiplier-scaled) time since this drop spawned**, computed fresh on every `/state` call as `now - spawn_time` where both use the same `effective_time` as `time.phase` (see §4b) — this value keeps increasing between polls even though the underlying drop object doesn't otherwise change, and it is **not** wall-clock-continuous the way real elapsed time is if `speed_multiplier != 1` (see §10 for local extrapolation). Drops are removed once `age >= drop_lifetime` (from `config.json`) or once the last unit is eaten or carried off by a creature. |
 
 ---
 
@@ -424,9 +431,10 @@ snapshots; existing IDs' fields update in place.
 What the world file (`chunks/chunk_0_0.wrld`) keeps across a restart:
 
 - Terrain, vegetation, and their ages.
-- **All live fauna** — each creature's tile, age, hunger, sleep state, `home`
-  and `id`, plus the id counter, so a reloaded world neither reseeds its
-  population nor reissues an id that's already in use.
+- **All live fauna** — each creature's tile, age, hunger, sleep state, `home`,
+  whatever it's `carrying` and its `id`, plus the id counter, so a reloaded
+  world neither reseeds its population nor reissues an id that's already in
+  use.
 - **All standing structures** — tile, `age`, `contains` and `id`, likewise
   with their counter. A `home` pointing at a structure that didn't survive
   the round trip is cleared on load, so the two never disagree.

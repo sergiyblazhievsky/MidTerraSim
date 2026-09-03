@@ -36,7 +36,7 @@ python main.py
 - Stop the server with **Ctrl+C** in its console — it saves the world before exiting.
 - CLI overrides are available on both: `python server.py --host 0.0.0.0 --port 8765`, `python main.py --host 127.0.0.1 --port 8765`.
 
-World state is saved to `chunks/chunk_0_0.wrld` periodically (`server.save_interval` in `config.json`), on `POST /save`, and on clean shutdown. That includes **flora, fauna, structures, and the simulation clock**: every creature's tile, age, hunger, sleep state, `home` and `id`, every burrow's tile/age/larder, plus the current season, cycle counter and day number. A restarted server therefore picks up the same population, in the same season, where it left off rather than reseeding a fresh spring world. Item drops are *not* persisted (their lifetime is tied to simulation time), and the day/night phase isn't either — it's derived from the wall clock.
+World state is saved to `chunks/chunk_0_0.wrld` periodically (`server.save_interval` in `config.json`), on `POST /save`, and on clean shutdown. That includes **flora, fauna, structures, and the simulation clock**: every creature's tile, age, hunger, sleep state, `home`, whatever it's `carrying` and its `id`, every burrow's tile/age/larder, plus the current season, cycle counter and day number. A restarted server therefore picks up the same population, in the same season, where it left off rather than reseeding a fresh spring world. Item drops are *not* persisted (their lifetime is tied to simulation time), and the day/night phase isn't either — it's derived from the wall clock.
 
 The save format is at `version: 2` (see [`chunk.py`](./chunk.py)'s module docstring for the full JSON shape). Older `version: 1` files still load — they simply have no fauna or clock to restore, so the server seeds a fresh population and starts at spring, day 0.
 
@@ -103,13 +103,14 @@ What's covered:
 - World seeding, tag/diet/avoidance resolution, vegetation stage lookup
 - Fauna persistence: saving live creatures into the world file, restoring them on load, keeping ids unique, and seeding any species the file doesn't know about
 - Clock persistence: resuming season/cycle/day, falling back when a saved season is no longer in `config.json`, and seeding the day/night edge from the current phase
-- Item drops: spawn, stage-specific loot, expiry, and pickup (including diet/sleep gating)
+- Item drops: spawn, stage-specific loot, expiry, and pickup (including diet/sleep gating, and leaving a stack alone when the creature is full or only ate part of it)
 - Flower attack/eat-in-place feeding
 - Herbivore plant diets (`_resolve_plant_diet`, `_act_feed_plants`): grazing ground cover, browsing bushes, and seeking the nearest plant within `feed_radius`
 - `feed_radius` resolution (`_feed_radius`) and its effect on both the carnivore and herbivore search paths
 - Creature pathfinding primitives (`_step_toward`, `_find_nearest_*`, `_move_creature_random`)
-- Creature needs/sleep state machine (`_compute_creature_needs`, `_pick_highest_need`, `_act_feed`, `_creature_move`)
+- Creature needs/sleep state machine (`_compute_creature_needs`, `_ranked_needs`, `_act_feed`, `_creature_move`), including a task declining its turn and handing over to the next need
 - Structures: the `home` need accruing while homeless, building/adopting a burrow (`_act_home`), one structure per tile, seasonal weathering and collapse (`_break_structures`), eviction of dwellers, and structure persistence including dangling-`home` cleanup
+- Stocking (`_act_stock`, `_act_deliver`): need ordering against hunger and shelter, taking one item off a stack, hauling it home ignoring all other needs, stashing/stacking it in the larder, and putting it back on the ground when the burrow or the creature is lost
 - Daily/seasonal lifecycle (hunger/age decay, winter aging, reproduction each season change, removal)
 - The flora simulation cycle (`_sim_step`): decay, season rotation, tag-driven spawn-blocking rules, and season-gated spawning (`spawn.active_seasons`, used by grass)
 - `tick()` scheduling: day/night transitions, revision counting, periodic save/sim-step triggers, creature movement/sleep timing, and `speed_multiplier` scaling
@@ -146,18 +147,20 @@ flowers/bushes/trees); they remain in `/state` for the UI client.
 ▾ Structures (2)
   ▾ burrow (2)
       ▾ burrow #1
-          position: (7, 11)  age: 2  dwellers: rat #3  contains: —
+          position: (7, 11)  age: 2  dwellers: rat #3  contains: 2x berry, 1x seed
       ▸ burrow #2
 ▾ Creatures (10)
   ▾ rabbit (5)
     ▸ rabbit #1 ... #5
   ▾ rat (5)
       ▾ rat #1
-          position: (13, 88)  age: 2  hunger: 3  sleep: 0  asleep: false  home: —
+          position: (13, 88)  age: 2  hunger: 3  sleep: 0  asleep: false
+          home: #1  carrying: berry
         ▾ needs
             feed: 0
             sleep: 0
-            home: 1.5
+            home: 0
+            stock: 0.9
       ▸ rat #2 ... #5
 ▸ Drops (0)
 ```
@@ -238,9 +241,9 @@ Defines items, vegetation, structures, and creatures. Loaded independently by **
 **Structures** — things creatures build. `texture`, `render` (`"surface"`),
 `initial_age` (how many seasonal hits it can take), `break_chance` (per-season
 odds of taking one), `dwellers` (which creatures may live in it, by name or
-tag), and `contains` (the dwellers' larder — persisted, but nothing fills it
-yet). Structures are *not* blocks: they live on a tile alongside whatever
-vegetation is there and are drawn over it.
+tag), and `contains` (the dwellers' larder, which the `stock` need fills with
+`{"item", "count"}` entries). Structures are *not* blocks: they live on a tile
+alongside whatever vegetation is there and are drawn over it.
 
 **Creatures** — `needs`, `diet`, hunger/age, movement, reproduction, death loot.
 `diet` entries are resolved against both items and vegetation, by name or by
@@ -248,11 +251,15 @@ tag: matching **items** make a carnivore/scavenger that eats drops and attacks
 flowers (rat), while matching **vegetation** makes a herbivore that grazes and
 browses plants (rabbit). Diet order is preference order.
 
-`feed_radius` caps how far a hungry creature will look for its food, in
-Manhattan tiles, and applies to *both* paths — drop/flower search for
-carnivores, plant search for herbivores. It defaults to
+`feed_radius` caps how far a creature will look for food, in Manhattan tiles,
+and applies to *all* search paths — drop/flower search for carnivores, plant
+search for herbivores, and the hunt for something to hoard. It defaults to
 `server.DEFAULT_FEED_RADIUS` (5) when a definition omits it, but both shipped
 creatures declare it explicitly (rat 5, rabbit 6).
+
+`stock_need` is the fixed priority of the `stock` need (`0.9`, or
+`server.DEFAULT_STOCK_NEED`); `home_gain` (`0.5`) is how much wanting a home
+grows per day while homeless.
 
 Block IDs (`chunk.py`): `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRASS_PATCH=5`
 
@@ -344,6 +351,34 @@ Sleep is a plain need value with **no threshold** — it just competes with othe
 - Each night movement cycle a creature is awake, `sleep` increases by `sleep_gain` (default `0.5`)
 - Whichever need (`feed` or `sleep`) has the higher value wins; if `sleep` wins, the creature stops moving, is marked `asleep`, and the client renders it with `sleep_texture`
 - At the start of each day, `sleep` resets to `0`, `asleep` clears, and the client renders the normal `texture` again
+
+### Creature stock AI (rats)
+
+A fed creature with a burrow hoards food in it. Unlike the other needs,
+`stock` has a **constant** value (`stock_need`, `0.9`) — hoarding is never
+satisfied and never urgent, so the number exists purely to place it in the
+pecking order: below any real hunger (`feed` is ≥ 1 the moment a creature is
+hungry at all) and above a `home` want that hasn't had two days to build up.
+
+When `stock` comes up:
+
+1. If the creature has no standing burrow, it declines the turn
+2. If an edible drop is on its tile, it takes **one** item from it (the rest of the stack stays on the ground), and that item becomes its `carrying`
+3. Else it steps toward the nearest edible drop within `feed_radius`
+4. If there's nothing in reach, it declines the turn
+
+Declining matters: needs are ranked by value and tried in order, so a turn a
+task passes on falls through to the next need rather than wasting the tick.
+
+**While carrying, needs are not evaluated at all** — a loaded creature won't
+stop to eat, sleep or dig. It walks to its burrow, and on arrival the item
+moves from `carrying` into the burrow's `contains` (stacking by item name).
+If the burrow collapses mid-haul, or the creature dies, the item is put back
+on the ground rather than vanishing. Nothing draws on a stocked larder yet.
+
+Rabbits declare the need but never act on it: their diet resolves to
+vegetation rather than items, so there's nothing carryable for them to fetch
+and the turn always falls through.
 
 ### Creature home AI (rats / rabbits)
 

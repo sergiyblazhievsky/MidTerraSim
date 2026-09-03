@@ -4,7 +4,8 @@ Handoff document for continuing work in a new chat. Last updated 2026-09-03
 (rabbits, per-season reproduction, grass as a soft under-layer, player
 fall-through fix — see [Gotchas](#gotchas) before touching player height —
 world-file persistence of fauna + the simulation clock, a data-driven
-`feed_radius`, and burrows/the `home` need).
+`feed_radius`, burrows/the `home` need, and the `stock` need that fills a
+burrow's larder).
 
 ---
 
@@ -70,7 +71,9 @@ counter, plus a `time` section (`cycle`/`season`/`day`).
   "the rats died, leave it empty" — don't collapse those two cases.
 - `Chunk.normalize_creature()` coerces field types on load and drops entries
   without a usable `id`/`x`/`z`, so a hand-edited file can't feed strings into
-  the simulation.
+  the simulation. Nullable fields go through their own coercers —
+  `_as_optional_int` for `home`, `_as_optional_str` for `carrying` — where
+  `null` and `""` both mean "none".
 - Not persisted: item drops (their `age` is measured against simulation time),
   revision counters, the day/night phase (wall-clock derived), `speed_multiplier`.
 
@@ -93,18 +96,22 @@ with `World.snapshot()` and `make_handler()` in `server.py`.
 Grass uses `stage.render: "surface"` (flat tile texture over soil); other flora
 default to `"cross"` (vertical billboard).
 
-**Creatures** — rat + rabbit with `needs: ["feed", "sleep", "home"]`. Rat
-`diet: ["food"]` (item drops + flower attacks). Rabbit
+**Creatures** — rat + rabbit with `needs: ["feed", "sleep", "home", "stock"]`.
+Rat `diet: ["food"]` (item drops + flower attacks). Rabbit
 `diet: ["grass", "bush"]` (eat grass cover, else browse bushes). Both declare
-`feed_radius` (rat 5, rabbit 6), which caps the food search on either path,
-and `home_gain: 0.5`, the per-day want for shelter while homeless.
+`feed_radius` (rat 5, rabbit 6), which caps every food search including the
+hunt for something to hoard; `home_gain: 0.5`, the per-day want for shelter
+while homeless; and `stock_need: 0.9`, the fixed rank of hoarding. Only the
+rat can actually stock: the rabbit's diet resolves to vegetation, and there's
+no carryable item in it.
 
 **Structures** — burrow, the first one. Not a block: it lives on a tile
 next to whatever vegetation is there, rendered as a `"surface"` quad above
 the ground and grass. `dwellers: ["rat", "rabbit"]` (matched by creature name
 *or* tag) decides who may live in it; `initial_age: 2` and
-`break_chance: 0.2` drive seasonal weathering; `contains` is a persisted but
-so-far-unused larder for dwellers stashing food.
+`break_chance: 0.2` drive seasonal weathering; `contains` is the larder the
+`stock` need fills, holding `{"item", "count"}` entries. Nothing eats from it
+yet.
 
 Texture is `textures/burrow_grass_64.png` — see [Texture Assets](#texture-assets).
 
@@ -114,24 +121,36 @@ Block IDs: `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRAS
 
 - Floating billboard quads with 16×16 textures (`textures/*_16.png`)
 - Spawned on vegetation/creature death via `_drop_from()` (stage-aware)
-- Expire after `drop_lifetime` seconds; no auto-pickup
-- Eating handled only by creature feed AI
+- Expire after `drop_lifetime` seconds
+- `_update_drops()` also feeds any awake creature within 1 tile whose diet
+  matches. It consumes only what the creature has room for and leaves the
+  rest of the stack; a full creature doesn't touch it. (It used to discard
+  the whole stack either way, so a sated creature standing nearby destroyed
+  food outright — that blocked stocking, where the hauler is always full.)
+- Deliberate eating goes through the creature feed AI (`_eat_food_at_block`)
 
-### Creature needs / feed + sleep + home AI
+### Creature needs / feed + sleep + home + stock AI
 
-Rat and rabbit both define `needs: ["feed", "sleep", "home"]`. Each movement
-tick per fauna instance:
+Rat and rabbit both define `needs: ["feed", "sleep", "home", "stock"]`. Each
+movement tick per fauna instance:
 
+0. `_creature_move()` — if `carrying` is set, skip needs entirely and run
+   `_act_deliver()` (haul it home)
 1. `_compute_creature_needs()` — `feed` = `initial_hunger - hunger`; `sleep`
    = `0` if already `asleep`, else the running `sleep` accumulator; `home`
-   = `0` if it has a home, else the running `home_need` accumulator
-2. `_pick_highest_need()` — highest value task wins, or none if all ≤ 0
-3. `_creature_move()` — execute the winning task (`sleep`/`feed`/`home`) or
-   random walk
+   = `0` if it has a home, else the running `home_need` accumulator; `stock`
+   = the constant `stock_need`
+2. `_ranked_needs()` — every task with a value > 0, strongest first (ties
+   keep declaration order)
+3. `_act_on_need()` per task in that order — the first one that returns a
+   position wins; `None` means "declined, try the next need". Only
+   `_act_stock()` declines today; `_act_feed`/`_act_home` fall back to a
+   random walk internally, so they always claim the turn.
 
-Needs compete purely by value, which sets the de-facto priority: `feed`
-grows 1/day against `home`'s 0.5/day, so a hungry creature always eats
-before it digs.
+Needs compete purely by value, which sets the de-facto priority: `feed` grows
+1/day against `home`'s 0.5/day, so a hungry creature always eats before it
+digs; `stock`'s fixed 0.9 sits below any real hunger (≥ 1) and above a home
+want that has only built up for one day.
 
 **Feed priority:**
 1. Eat food on same tile (`_resolve_diet` → items with matching tags/names)
@@ -147,6 +166,18 @@ the structure already there if `dwellers` allows it, else build one (never
 two on a tile). Sets `home` to that structure's id and zeroes the
 accumulator. A collapsing structure clears its dwellers' `home`, so they
 start wanting one again.
+
+**Stock (`_act_stock` → `_act_deliver`):** fetch one edible drop back to the
+burrow. Declines (returns `None`) with no standing burrow or nothing edible
+within `feed_radius`. On the drop's tile it takes a single item off the stack
+into `carrying`; from then on `_creature_move` short-circuits to
+`_act_deliver` until the item is stashed in the burrow's `contains` (stacked
+by item name). Losing the burrow mid-haul, or dying, spawns the item back on
+the ground instead of voiding it. Nothing consumes a stocked larder yet.
+
+Note the ordering trap: `stock` only outranks `home` at 0.9 vs 0.5, so a
+creature dug its burrow on day two of being homeless *before* it starts
+hoarding — and it must be fully fed, since any hunger scores ≥ 1.
 
 **Sleep:** no threshold — it's a plain value that competes with `feed` for
 priority. Each night movement cycle a creature is awake, `sleep` increases
@@ -194,8 +225,9 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 | Entity loading | `load_entities()`, `_veg_with_tag()`, `_items_with_tag()`, `_resolve_diet()` |
 | World drops | `_spawn_drop()`, `_drop_from()`, `_update_drops()` |
 | Simulation | `_sim_step()`, `_count_kind_near()`, `tick()` |
-| Creature AI | `_compute_creature_needs()`, `_act_feed()`, `_act_feed_plants()`, `_feed_radius()`, `_act_home()`, `_creature_move()`, `_eat_food_at_block()` |
-| Structures | `_resolve_home_structure()`, `_can_dwell()`, `_structure_at()`, `_build_structure()`, `_remove_structure()`, `_break_structures()`, `_settle_home()` |
+| Creature AI | `_compute_creature_needs()`, `_ranked_needs()`, `_act_on_need()`, `_act_feed()`, `_act_feed_plants()`, `_feed_radius()`, `_act_home()`, `_creature_move()`, `_eat_food_at_block()` |
+| Structures | `_resolve_home_structure()`, `_can_dwell()`, `_structure_at()`, `_structure_by_id()`, `_build_structure()`, `_remove_structure()`, `_break_structures()`, `_settle_home()` |
+| Stocking | `_stock_need()`, `_act_stock()`, `_pick_up_drop_at()`, `_act_deliver()`, `_stash_carried()`, `_drop_carried()` |
 | Lifecycle | `_on_day_start()`, `_on_season_start()`, `_spawn_creature_at()`, `_remove_creature()` |
 | Fauna persistence | `_load_or_seed_creatures()`, `_restore_creature_type()`, `_seed_creature_type()`, `_store_creatures_in_chunk()`, `save()` |
 | Clock persistence | `_restore_clock()`, `_store_clock_in_chunk()`, `DEFAULT_SEASON`, `DAY_FRACTION` |
@@ -296,6 +328,8 @@ frame times spike from actual mesh building.
 26. `feed_radius` is now data-driven for rats too (was hardcoded 5 in `_find_nearest_food_drop`/`_find_nearest_flower`); both feed paths read it through `_feed_radius()`
 27. Added `structures` as a third entity category, starting with the **burrow**: rats/rabbits gain a `home` need, dig or adopt one where they stand, and get evicted when a season collapses it
 28. Added [`roadmap.md`](./roadmap.md) backlog; linked from README
+29. Added the **`stock` need**: a fed, housed creature fetches one edible drop within `feed_radius`, carries it home ignoring every other need, and stashes it in the burrow's `contains`. Needs are now *ranked* (`_ranked_needs`, replacing `_pick_highest_need`) so a task with nothing to do declines its turn and the next need runs instead
+30. Fixed `_update_drops()` destroying a whole stack whenever an adjacent creature was near it, even one too full to eat anything — a hauler is always full, so this ate the feature's food before it could be carried
 
 ## Session Work Log (2026-09-02)
 
@@ -312,8 +346,8 @@ frame times spike from actual mesh building.
 
 ## Likely Next Steps
 
-- Fill in the burrow `contains` larder — dwellers hauling food home to
-  preserve it (the field already persists; nothing writes to it)
+- Eat from the larder — `stock` fills `contains` but nothing draws on it, so
+  a stocked burrow doesn't yet help anyone through a lean winter
 - Sleeping/breeding inside a burrow rather than wherever the creature stands
 - Extend `needs` beyond `feed`/`sleep`/`home` (thirst, etc.)
 - Predators (fox/wolf) — needs a new "hunt" behavior; the plant-diet path
@@ -335,13 +369,14 @@ frame times spike from actual mesh building.
 ```json
 {
   "name": "rat",
-  "needs": ["feed", "sleep", "home"],
+  "needs": ["feed", "sleep", "home", "stock"],
   "diet": ["food"],
   "feed_radius": 5,
   "initial_hunger": 3,
   "attack": 1,
   "sleep_gain": 0.5,
   "home_gain": 0.5,
+  "stock_need": 0.9,
   "avoids_block_tag": "tree",
   "reproduce_count": [1, 6]
 }
@@ -350,7 +385,7 @@ frame times spike from actual mesh building.
 ```json
 {
   "name": "rabbit",
-  "needs": ["feed", "sleep", "home"],
+  "needs": ["feed", "sleep", "home", "stock"],
   "diet": ["grass", "bush"],
   "feed_radius": 6,
   "initial_hunger": 5,
@@ -358,6 +393,7 @@ frame times spike from actual mesh building.
   "attack": 1,
   "sleep_gain": 0.5,
   "home_gain": 0.5,
+  "stock_need": 0.9,
   "avoids_block_tag": "tree",
   "reproduce_count": [2, 3],
   "contains": [{ "item": "meat", "count": [2, 3] }]

@@ -16,12 +16,14 @@ JSON format:
       "rat": [
         {"id": 3, "x": 10, "z": 44, "age": 2, "hunger": 3,
          "attack": 1, "sleep": 0.0, "asleep": false,
-         "home": 2, "home_need": 0.0}   # home = structure id, null if none
+         "home": 2, "home_need": 0.0,   # home = structure id, null if none
+         "carrying": "berry"}           # item being hauled home, or null
       ]
     },
     "next_creature_id": 12,     # so ids stay unique across save/load
     "structures": [             # things creatures build, e.g. burrows
-      {"id": 2, "type": "burrow", "x": 10, "z": 44, "age": 2, "contains": []}
+      {"id": 2, "type": "burrow", "x": 10, "z": 44, "age": 2,
+       "contains": [{"item": "berry", "count": 3}]}   # the dwellers' larder
     ],
     "next_structure_id": 5,
     "time": {                   # simulation clock; season is an entities/config
@@ -74,6 +76,13 @@ def _as_optional_int(value):
     return int(value)
 
 
+def _as_optional_str(value):
+    """For a nullable name (a creature's carried item): null/"" mean "none"."""
+    if value is None or value == '':
+        return None
+    return str(value)
+
+
 def _as_list(value):
     if not isinstance(value, list):
         raise ValueError('expected a list')
@@ -85,6 +94,7 @@ _CREATURE_FIELDS = {
     'id': int, 'x': int, 'z': int, 'age': int, 'hunger': int,
     'attack': int, 'sleep': float, 'asleep': bool,
     'home': _as_optional_int, 'home_need': float,
+    'carrying': _as_optional_str,
 }
 
 # One saved structure instance (a burrow, and whatever comes later).
