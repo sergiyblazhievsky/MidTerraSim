@@ -113,6 +113,8 @@ class World:
         self.flower_vdef = next((v for v in self.entities_cfg.get('vegetation', [])
                                   if v.get('name') == 'flower'), None)
         self.creature_defs = list(self.entities_cfg.get('creatures', []))
+        self.structure_defs = list(self.entities_cfg.get('structures', []))
+        self.structure_defs_by_name = {s['name']: s for s in self.structure_defs}
         self._tag_to_bids = {}
         for v in self.entities_cfg.get('vegetation', []):
             for t in v.get('tags', []):
@@ -147,6 +149,10 @@ class World:
         self._next_creature_id = 0
         restored_names = self._load_or_seed_creatures()
 
+        self.world_structures = []
+        self._next_structure_id = 0
+        self._restore_structures()
+
         self.world_drops = []
         self._next_drop_id = 0
 
@@ -154,6 +160,7 @@ class World:
         self._save_timer = 0.0
         self.revision = 0
         self.vegetation_revision = 0
+        self.structure_revision = 0
 
         print(f'[server] world loaded: {self.sx}x{self.sy}x{self.sz} (surface_y={self.SY})')
         clock_source = 'resumed' if self.chunk.season else 'fresh'
@@ -162,6 +169,8 @@ class World:
         for ci, cdef in enumerate(self.creature_defs):
             source = 'restored' if cdef['name'] in restored_names else 'spawned'
             print(f'[server] {source} {len(self.all_creature_positions[ci])}x {cdef["name"]}')
+        if self.world_structures:
+            print(f'[server] restored {len(self.world_structures)} structure(s)')
 
     # ── config ────────────────────────────────────────────────────────────
     def _apply_config(self, config):
@@ -346,15 +355,22 @@ class World:
         stats = []
         for _ in positions:
             self._next_creature_id += 1
-            stats.append({
-                'id': self._next_creature_id,
-                'age': cdef.get('initial_age', 1),
-                'hunger': cdef.get('initial_hunger', 3),
-                'attack': cdef.get('attack', 0),
-                'sleep': 0.0,
-                'asleep': False,
-            })
+            stats.append(self._new_creature_stats(cdef))
         return positions, stats
+
+    def _new_creature_stats(self, cdef):
+        """Fresh per-individual state. `home` is the id of the structure this
+        creature dwells in, None while it has none."""
+        return {
+            'id': self._next_creature_id,
+            'age': cdef.get('initial_age', 1),
+            'hunger': cdef.get('initial_hunger', 3),
+            'attack': cdef.get('attack', 0),
+            'sleep': 0.0,
+            'asleep': False,
+            'home': None,
+            'home_need': 0.0,
+        }
 
     def _seed_creatures(self):
         for cdef in self.creature_defs:
@@ -377,6 +393,8 @@ class World:
                 'attack': inst.get('attack', cdef.get('attack', 0)),
                 'sleep': inst.get('sleep', 0.0),
                 'asleep': inst.get('asleep', False),
+                'home': inst.get('home'),
+                'home_need': inst.get('home_need', 0.0),
             })
         return positions, stats
 
@@ -408,6 +426,8 @@ class World:
                     'attack': st['attack'],
                     'sleep': float(st.get('sleep', 0.0)),
                     'asleep': bool(st.get('asleep', False)),
+                    'home': st.get('home'),
+                    'home_need': float(st.get('home_need', 0.0)),
                 }
                 for (x, z), st in zip(self.all_creature_positions[ci],
                                       self.all_creature_stats[ci])
@@ -420,18 +440,120 @@ class World:
                        for st in stats), default=0)
         self.chunk.next_creature_id = max(self._next_creature_id, highest)
 
+    # ── structures (burrows) ──────────────────────────────────────────────
+    def _restore_structures(self):
+        """Load structures saved in the world file. Types that no longer exist
+        in entities.json are dropped rather than kept as unrenderable ghosts."""
+        self._next_structure_id = self.chunk.next_structure_id
+        for inst in self.chunk.structures:
+            if inst['type'] not in self.structure_defs_by_name:
+                print(f'[server] dropping saved structure of unknown type '
+                      f'{inst["type"]!r}')
+                continue
+            self.world_structures.append({
+                'id': inst['id'],
+                'type': inst['type'],
+                'x': min(max(inst['x'], 0), self.sx - 1),
+                'z': min(max(inst['z'], 0), self.sz - 1),
+                'age': inst.get('age', self._structure_initial_age(inst['type'])),
+                'contains': list(inst.get('contains', [])),
+            })
+        self._evict_dangling_homes()
+
+    def _evict_dangling_homes(self):
+        """Clear any creature whose saved home points at a structure that is
+        no longer around, so it wants a new one instead of a dead id."""
+        live_ids = {s['id'] for s in self.world_structures}
+        for stats in self.all_creature_stats:
+            for st in stats:
+                if st.get('home') is not None and st['home'] not in live_ids:
+                    st['home'] = None
+
+    def _store_structures_in_chunk(self):
+        """Mirror live structures into the chunk so the next save persists them."""
+        self.chunk.structures = [
+            {
+                'id': s['id'], 'type': s['type'], 'x': s['x'], 'z': s['z'],
+                'age': s['age'], 'contains': list(s['contains']),
+            }
+            for s in self.world_structures
+        ]
+        highest = max((s['id'] for s in self.world_structures), default=0)
+        self.chunk.next_structure_id = max(self._next_structure_id, highest)
+
+    def _structure_initial_age(self, type_name):
+        sdef = self.structure_defs_by_name.get(type_name, {})
+        return int(sdef.get('initial_age', 1))
+
+    def _structure_at(self, x, z):
+        """The structure occupying this tile, if any -- only one may."""
+        for s in self.world_structures:
+            if s['x'] == x and s['z'] == z:
+                return s
+        return None
+
+    def _can_dwell(self, cdef, sdef):
+        """Whether this creature is one of the structure's dwellers, matched by
+        creature name or tag (same name-or-tag rule as diets)."""
+        dwellers = sdef.get('dwellers', [])
+        if cdef['name'] in dwellers:
+            return True
+        return any(self._has_tag(cdef, entry) for entry in dwellers)
+
+    def _resolve_home_structure(self, cdef):
+        """The structure definition this creature builds as its home."""
+        for sdef in self.structure_defs:
+            if self._can_dwell(cdef, sdef):
+                return sdef
+        return None
+
+    def _build_structure(self, sdef, x, z):
+        self._next_structure_id += 1
+        structure = {
+            'id': self._next_structure_id,
+            'type': sdef['name'],
+            'x': x, 'z': z,
+            'age': int(sdef.get('initial_age', 1)),
+            'contains': [],
+        }
+        self.world_structures.append(structure)
+        self.structure_revision += 1
+        return structure
+
+    def _remove_structure(self, index):
+        """Remove a structure and evict its dwellers, so anything that called
+        it home starts wanting a new one instead of pointing at a dead id."""
+        structure = self.world_structures.pop(index)
+        for stats in self.all_creature_stats:
+            for st in stats:
+                if st.get('home') == structure['id']:
+                    st['home'] = None
+        self.structure_revision += 1
+        print(f'[structure] {structure["type"]}#{structure["id"]} collapsed at '
+              f'({structure["x"]},{structure["z"]})')
+        return structure
+
+    def _break_structures(self):
+        """Season start: each structure may weather a hit and eventually
+        collapse. `break_chance` and the age it burns through are per-type."""
+        for index in reversed(range(len(self.world_structures))):
+            structure = self.world_structures[index]
+            sdef = self.structure_defs_by_name.get(structure['type'], {})
+            if random.random() >= float(sdef.get('break_chance', 0.0)):
+                continue
+            structure['age'] -= 1
+            self.structure_revision += 1
+            if structure['age'] <= 0:
+                self._remove_structure(index)
+            else:
+                print(f'[structure] {structure["type"]}#{structure["id"]} damaged '
+                      f'at ({structure["x"]},{structure["z"]}) age={structure["age"]}')
+
     def _spawn_creature_at(self, ci, x, z):
         cdef = self.creature_defs[ci]
         self._next_creature_id += 1
         self.all_creature_positions[ci].append((x, z))
-        self.all_creature_stats[ci].append({
-            'id': self._next_creature_id,
-            'age': cdef.get('initial_age', 1),
-            'hunger': cdef.get('initial_hunger', 3),
-            'attack': cdef.get('attack', 0),
-            'sleep': 0.0,
-            'asleep': False,
-        })
+        self.all_creature_stats[ci].append(self._new_creature_stats(cdef))
 
     def _remove_creature(self, ci, i):
         cdef = self.creature_defs[ci]
@@ -753,6 +875,10 @@ class World:
                 needs['feed'] = max(0, init_hunger - st['hunger'])
             elif need == 'sleep':
                 needs['sleep'] = 0 if st.get('asleep', False) else st.get('sleep', 0.0)
+            elif need == 'home':
+                # Satisfied outright while it has somewhere to dwell; the want
+                # only accrues (at day start) while homeless.
+                needs['home'] = 0 if st.get('home') else st.get('home_need', 0.0)
         return needs
 
     @staticmethod
@@ -771,6 +897,37 @@ class World:
         st = self.all_creature_stats[ci][i]
         st['asleep'] = True
 
+    def _settle_home(self, ci, i, structure):
+        st = self.all_creature_stats[ci][i]
+        st['home'] = structure['id']
+        st['home_need'] = 0.0
+
+    def _act_home(self, ci, i, cdef, x, z, avoids):
+        """Claim a home on the tile the creature is standing on: adopt the
+        structure already there if this creature dwells in that kind, else
+        build one. Only one structure may occupy a tile."""
+        sdef = self._resolve_home_structure(cdef)
+        if sdef is None:
+            return self._move_creature_random(x, z, avoids)
+
+        who = f'{cdef["name"]}#{self.all_creature_stats[ci][i]["id"]}'
+        existing = self._structure_at(x, z)
+        if existing is not None:
+            existing_def = self.structure_defs_by_name.get(existing['type'])
+            if existing_def and self._can_dwell(cdef, existing_def):
+                self._settle_home(ci, i, existing)
+                print(f'[home] {who} moved into '
+                      f'{existing["type"]}#{existing["id"]} at ({x},{z})')
+                return (x, z)
+            # Tile is taken by something it can't live in — look elsewhere.
+            return self._move_creature_random(x, z, avoids)
+
+        structure = self._build_structure(sdef, x, z)
+        self._settle_home(ci, i, structure)
+        print(f'[home] {who} built '
+              f'{structure["type"]}#{structure["id"]} at ({x},{z})')
+        return (x, z)
+
     def _creature_move(self, ci, i, cdef, x, z, avoids):
         st = self.all_creature_stats[ci][i]
         needs = self._compute_creature_needs(cdef, st)
@@ -780,6 +937,8 @@ class World:
             return (x, z)
         if task == 'feed':
             return self._act_feed(ci, i, cdef, x, z, avoids)
+        if task == 'home':
+            return self._act_home(ci, i, cdef, x, z, avoids)
         return self._move_creature_random(x, z, avoids)
 
     # ── daily / seasonal lifecycle ────────────────────────────────────────
@@ -801,12 +960,23 @@ class World:
                 for i in range(len(self.all_creature_stats[ci])):
                     self._wake_creature(ci, i, cdef)
 
+            # Wanting a home builds up day by day for as long as it lacks one.
+            if 'home' in cdef.get('needs', []):
+                home_gain = cdef.get('home_gain', 0.5)
+                for st in self.all_creature_stats[ci]:
+                    if st.get('home') is None:
+                        st['home_need'] = st.get('home_need', 0.0) + home_gain
+
             surviving = self.all_creature_stats[ci]
             print(f'[day] {cdef["name"]} count={len(surviving)}  ' +
                   '  '.join(f'#{i} age={s["age"]} hunger={s["hunger"]}'
                             for i, s in enumerate(surviving)))
 
     def _on_season_start(self, season_name):
+        # Weather the structures first: a creature evicted this season starts
+        # wanting a new home right away.
+        self._break_structures()
+
         for ci, cdef in self._creatures_with_tag('fauna'):
             # Winter ages fauna first so only survivors breed this season.
             if season_name == 'winter':
@@ -1000,10 +1170,13 @@ class World:
     # ── persistence ───────────────────────────────────────────────────────
     def save(self):
         self._store_creatures_in_chunk()
+        self._store_structures_in_chunk()
         self._store_clock_in_chunk()
         self.chunk.save(WORLD_FILE)
         counts = ', '.join(f'{len(self.all_creature_positions[ci])} {cdef["name"]}'
                            for ci, cdef in enumerate(self.creature_defs))
+        if self.world_structures:
+            counts += f', {len(self.world_structures)} structures'
         print(f'[server] saved world to {WORLD_FILE}' + (f' ({counts})' if counts else ''))
 
     # ── snapshot for API clients ──────────────────────────────────────────
@@ -1030,6 +1203,7 @@ class World:
                     'hunger': st['hunger'],
                     'sleep': st.get('sleep', 0.0),
                     'asleep': st.get('asleep', False),
+                    'home': st.get('home'),
                     'needs': self._compute_creature_needs(cdef, st),
                 })
 
@@ -1041,9 +1215,19 @@ class World:
             for d in self.world_drops
         ]
 
+        structures = [
+            {
+                'id': s['id'], 'type': s['type'],
+                'x': s['x'], 'z': s['z'],
+                'age': s['age'], 'contains': list(s['contains']),
+            }
+            for s in self.world_structures
+        ]
+
         return {
             'revision': self.revision,
             'vegetation_revision': self.vegetation_revision,
+            'structure_revision': self.structure_revision,
             'chunk': {
                 'size': list(self.chunk.size),
                 'surface_y': self.SY,
@@ -1060,6 +1244,7 @@ class World:
                 'texture': self._terrain_texture,
             },
             'vegetation': vegetation,
+            'structures': structures,
             'creatures': creatures,
             'drops': drops,
         }
@@ -1193,12 +1378,34 @@ INSPECTOR_HTML = """<!doctype html>
         cinner += leaf(`<span class="kv">hunger</span>: ${c.hunger}`);
         cinner += leaf(`<span class="kv">sleep</span>: ${c.sleep}`);
         cinner += leaf(`<span class="kv">asleep</span>: ${c.asleep}`);
+        cinner += leaf(`<span class="kv">home</span>: ${c.home === null || c.home === undefined ? '&mdash;' : '#' + c.home}`);
         cinner += renderNeeds(ikey, c.needs);
         inner += details(ikey, `${name} #${c.id}`, undefined, cinner);
       }
       html += details(`creature:${name}`, name, items.length, inner);
     }
     return details('creatures', 'Creatures', state.creatures.length, html, 'section');
+  }
+
+  function renderStructures(state) {
+    const all = state.structures || [];
+    const groups = groupBy(all, s => s.type);
+    let html = '';
+    for (const name of Object.keys(groups).sort()) {
+      const items = groups[name].slice().sort((a, b) => a.id - b.id);
+      let inner = '';
+      for (const s of items) {
+        const dwellers = (state.creatures || []).filter(c => c.home === s.id);
+        let sinner = '';
+        sinner += leaf(`<span class="kv">position</span>: (${s.x}, ${s.z})`);
+        sinner += leaf(`<span class="kv">age</span>: ${s.age}`);
+        sinner += leaf(`<span class="kv">dwellers</span>: ${dwellers.length ? dwellers.map(c => esc(c.type) + ' #' + c.id).join(', ') : '&mdash;'}`);
+        sinner += leaf(`<span class="kv">contains</span>: ${s.contains && s.contains.length ? esc(JSON.stringify(s.contains)) : '&mdash;'}`);
+        inner += details(`structure:${name}:${s.id}`, `${name} #${s.id}`, undefined, sinner);
+      }
+      html += details(`structure:${name}`, name, items.length, inner);
+    }
+    return details('structures', 'Structures', all.length, html, 'section');
   }
 
   function renderDrops(state) {
@@ -1223,7 +1430,8 @@ INSPECTOR_HTML = """<!doctype html>
       const state = await resp.json();
 
       document.getElementById('tree').innerHTML =
-        renderVegetation(state) + renderCreatures(state) + renderDrops(state);
+        renderVegetation(state) + renderStructures(state)
+        + renderCreatures(state) + renderDrops(state);
 
       const t = state.time;
       document.getElementById('worldinfo').textContent =

@@ -14,8 +14,8 @@ A client/server 3D ecosystem simulation built with [Ursina Engine](https://www.u
 └─────────────────┘                        └──────────────────────────┘
 ```
 
-- **`server.py`** — no Ursina import, console-only. Owns the `Chunk`, all simulation timers (vegetation age/spawn, seasons, day/night, creature movement/needs/feeding/sleep/lifecycle/reproduction, item drops + expiry), and persistence. Keeps simulating whether or not any client is connected. Exposes a small stdlib-only HTTP/JSON API bound to `127.0.0.1` by default.
-- **`main.py`** — Ursina UI/client only. Polls the server's `/state` endpoint on a background thread (so a slow/offline server never freezes rendering), and rebuilds/updates visual entities (terrain, vegetation, creatures, drops) from the snapshot. Runs local first-person controls, camera, chunk-bound clamping, day/night visuals, and the HUD. If the server is unreachable it shows a **DISCONNECTED** banner and keeps retrying automatically; it reconnects on its own once the server is back — no restart of either process needed. Closing the UI (Esc or window close) never saves or shuts down the server.
+- **`server.py`** — no Ursina import, console-only. Owns the `Chunk`, all simulation timers (vegetation age/spawn, seasons, day/night, creature movement/needs/feeding/sleep/nesting/lifecycle/reproduction, structure weathering, item drops + expiry), and persistence. Keeps simulating whether or not any client is connected. Exposes a small stdlib-only HTTP/JSON API bound to `127.0.0.1` by default.
+- **`main.py`** — Ursina UI/client only. Polls the server's `/state` endpoint on a background thread (so a slow/offline server never freezes rendering), and rebuilds/updates visual entities (terrain, vegetation, structures, creatures, drops) from the snapshot. Runs local first-person controls, camera, chunk-bound clamping, day/night visuals, and the HUD. If the server is unreachable it shows a **DISCONNECTED** banner and keeps retrying automatically; it reconnects on its own once the server is back — no restart of either process needed. Closing the UI (Esc or window close) never saves or shuts down the server.
 
 ## Running
 
@@ -36,7 +36,7 @@ python main.py
 - Stop the server with **Ctrl+C** in its console — it saves the world before exiting.
 - CLI overrides are available on both: `python server.py --host 0.0.0.0 --port 8765`, `python main.py --host 127.0.0.1 --port 8765`.
 
-World state is saved to `chunks/chunk_0_0.wrld` periodically (`server.save_interval` in `config.json`), on `POST /save`, and on clean shutdown. That includes **flora, fauna, and the simulation clock**: every creature's tile, age, hunger, sleep state and `id`, plus the current season, cycle counter and day number. A restarted server therefore picks up the same population, in the same season, where it left off rather than reseeding a fresh spring world. Item drops are *not* persisted (their lifetime is tied to simulation time), and the day/night phase isn't either — it's derived from the wall clock.
+World state is saved to `chunks/chunk_0_0.wrld` periodically (`server.save_interval` in `config.json`), on `POST /save`, and on clean shutdown. That includes **flora, fauna, structures, and the simulation clock**: every creature's tile, age, hunger, sleep state, `home` and `id`, every burrow's tile/age/larder, plus the current season, cycle counter and day number. A restarted server therefore picks up the same population, in the same season, where it left off rather than reseeding a fresh spring world. Item drops are *not* persisted (their lifetime is tied to simulation time), and the day/night phase isn't either — it's derived from the wall clock.
 
 The save format is at `version: 2` (see [`chunk.py`](./chunk.py)'s module docstring for the full JSON shape). Older `version: 1` files still load — they simply have no fauna or clock to restore, so the server seeds a fresh population and starts at spring, day 0.
 
@@ -96,7 +96,7 @@ With coverage:
 python -m pytest --cov=server --cov=chunk --cov-report=term-missing
 ```
 
-Current coverage: **100%** on `chunk.py`, **95%** on `server.py` (the only uncovered lines are `server.py`'s `main()` CLI entrypoint/tick-loop, which isn't practical to exercise as a unit test, plus one pre-existing unreachable defensive branch).
+Current coverage: **100%** on `chunk.py`, **96%** on `server.py` (the uncovered lines are `server.py`'s `main()` CLI entrypoint/tick-loop, which isn't practical to exercise as a unit test, plus a handful of defensive guards and loop short-circuits that duplicate a check a caller has already made).
 
 What's covered:
 - Config loading/merging/hot-reload (`load_config`, `maybe_reload_config`)
@@ -109,6 +109,7 @@ What's covered:
 - `feed_radius` resolution (`_feed_radius`) and its effect on both the carnivore and herbivore search paths
 - Creature pathfinding primitives (`_step_toward`, `_find_nearest_*`, `_move_creature_random`)
 - Creature needs/sleep state machine (`_compute_creature_needs`, `_pick_highest_need`, `_act_feed`, `_creature_move`)
+- Structures: the `home` need accruing while homeless, building/adopting a burrow (`_act_home`), one structure per tile, seasonal weathering and collapse (`_break_structures`), eviction of dwellers, and structure persistence including dangling-`home` cleanup
 - Daily/seasonal lifecycle (hunger/age decay, winter aging, reproduction each season change, removal)
 - The flora simulation cycle (`_sim_step`): decay, season rotation, tag-driven spawn-blocking rules, and season-gated spawning (`spawn.active_seasons`, used by grass)
 - `tick()` scheduling: day/night transitions, revision counting, periodic save/sim-step triggers, creature movement/sleep timing, and `speed_multiplier` scaling
@@ -122,9 +123,9 @@ What's covered:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Human-facing HTML debug page — a collapsible tree of vegetation/creatures/drops, plus the admin speed control (see below) |
+| `/` | GET | Human-facing HTML debug page — a collapsible tree of vegetation/structures/creatures/drops, plus the admin speed control (see below) |
 | `/health` | GET | `{"status": "ok", "revision": <int>}` — cheap liveness/poll check |
-| `/state`  | GET | Full renderable world snapshot (terrain/time, vegetation, creatures, drops) |
+| `/state`  | GET | Full renderable world snapshot (terrain/time, vegetation, structures, creatures, drops) |
 | `/admin`  | GET | Current admin runtime state: `{"speed_multiplier": <int>}` |
 | `/save`   | POST | Force an immediate save to `chunks/chunk_0_0.wrld` |
 | `/admin/speed_multiplier` | POST | Set the runtime speed multiplier, `{"value": <int 1-100>}` |
@@ -142,15 +143,21 @@ flowers/bushes/trees); they remain in `/state` for the UI client.
     ▸ bush (474)
     ▸ flower (454)
     ▸ tree (212)
+▾ Structures (2)
+  ▾ burrow (2)
+      ▾ burrow #1
+          position: (7, 11)  age: 2  dwellers: rat #3  contains: —
+      ▸ burrow #2
 ▾ Creatures (10)
   ▾ rabbit (5)
     ▸ rabbit #1 ... #5
   ▾ rat (5)
       ▾ rat #1
-          position: (13, 88)  age: 2  hunger: 3  sleep: 0  asleep: false
+          position: (13, 88)  age: 2  hunger: 3  sleep: 0  asleep: false  home: —
         ▾ needs
             feed: 0
             sleep: 0
+            home: 1.5
       ▸ rat #2 ... #5
 ▸ Drops (0)
 ```
@@ -222,11 +229,18 @@ Hot-reloaded by the **server** every tick (no restart needed for `cycle_length`,
 
 ### `entities.json`
 
-Defines items, vegetation, and creatures. Loaded independently by **both** `server.py` (authoritative rules) and `main.py` (rendering/texture lookups) — unchanged from before.
+Defines items, vegetation, structures, and creatures. Loaded independently by **both** `server.py` (authoritative rules) and `main.py` (rendering/texture lookups) — unchanged from before.
 
 **Items** — `name`, `tags` (e.g. `raw`, `food` for seed/berry/meat)
 
 **Vegetation** — `tags`, `block_id`, `stages[]` (texture, optional `render`/`height`/`width`, per-stage loot), `spawn` rules. Stage `render` defaults to `"cross"` (vertical billboard); `"surface"` lays a flat texture on the tile top (used by grass).
+
+**Structures** — things creatures build. `texture`, `render` (`"surface"`),
+`initial_age` (how many seasonal hits it can take), `break_chance` (per-season
+odds of taking one), `dwellers` (which creatures may live in it, by name or
+tag), and `contains` (the dwellers' larder — persisted, but nothing fills it
+yet). Structures are *not* blocks: they live on a tile alongside whatever
+vegetation is there and are drawn over it.
 
 **Creatures** — `needs`, `diet`, hunger/age, movement, reproduction, death loot.
 `diet` entries are resolved against both items and vegetation, by name or by
@@ -244,7 +258,9 @@ Block IDs (`chunk.py`): `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `T
 
 Creature definitions are matched to saved fauna **by `name`**, so reordering
 `entities.json` is safe, and a species the world file has never seen is seeded
-fresh on load instead of requiring a world regeneration.
+fresh on load instead of requiring a world regeneration. Saved structures are
+matched by `type` the same way; a structure whose type no longer exists in
+`entities.json` is dropped on load rather than kept as an unrenderable ghost.
 
 #### Spawn priority (runtime)
 
@@ -329,10 +345,24 @@ Sleep is a plain need value with **no threshold** — it just competes with othe
 - Whichever need (`feed` or `sleep`) has the higher value wins; if `sleep` wins, the creature stops moving, is marked `asleep`, and the client renders it with `sleep_texture`
 - At the start of each day, `sleep` resets to `0`, `asleep` clears, and the client renders the normal `texture` again
 
+### Creature home AI (rats / rabbits)
+
+Rats and rabbits both dwell in **burrows**. A creature's `home` is the id of
+the structure it lives in, or empty while it has none:
+
+- Each **day start** a homeless creature's `home` need grows by `home_gain` (`0.5`); housed creatures don't accrue it, and their `home` need reads `0`
+- When `home` wins the needs contest, the creature claims the tile it is standing on: it adopts the burrow already there if it's a listed `dwellers` type, otherwise it digs a new one. Only one structure may occupy a tile.
+- On success its `home` is set to that burrow's id and the accrued need resets to `0`. Several creatures may share one burrow.
+- Burrows override the tile's look (drawn above both soil and grass) but don't block anything — vegetation keeps growing on the same tile
+
+Because needs simply compete by value, a starving creature keeps feeding
+(`feed` grows by 1/day) before it bothers digging (`home` grows by 0.5/day).
+Building happens once it's fed.
+
 Daily and seasonal events:
 
-- **Day start** — fauna lose 1 hunger (or 1 age if starving); sleeping fauna wake up
-- **Every season start** — fauna reproduce near existing individuals (`reproduce_count`)
+- **Day start** — fauna lose 1 hunger (or 1 age if starving); sleeping fauna wake up; homeless fauna want a home a bit more
+- **Every season start** — each structure has a `break_chance` (20% for burrows) of losing 1 age; at age 0 it collapses and its dwellers are evicted back to homeless. Then fauna reproduce near existing individuals (`reproduce_count`).
 - **Winter start** — all fauna lose 1 age first, then survivors reproduce
 
 ## Project Structure
@@ -345,7 +375,7 @@ MidTerraSim/
 ├── generate_chunk.py  # Procedural world and texture generation
 ├── map_viewer.py      # Top-down .wrld file inspector (Tkinter)
 ├── config.json        # Runtime simulation timing, seasons, and server/client host/port/poll options
-├── entities.json      # Items, vegetation, and creature definitions (read by both processes)
+├── entities.json      # Items, vegetation, structure, and creature definitions (read by both processes)
 ├── SERVER_CLIENT_API.md  # Full HTTP/JSON API contract for building your own client
 ├── takeover.md        # Session handoff notes for continuing development
 ├── roadmap.md         # Planned future work / backlog
@@ -353,7 +383,7 @@ MidTerraSim/
 ├── pytest.ini         # pytest discovery configuration
 ├── requirements-dev.txt  # Test-only dependencies (pytest, pytest-cov)
 ├── chunks/            # Saved world state (.wrld)
-└── textures/          # PNG assets (16×16 and 64×64 variants)
+└── textures/          # PNG assets (16×16 and 64×64 variants), referenced by name from entities.json
 ```
 
 ## Roadmap

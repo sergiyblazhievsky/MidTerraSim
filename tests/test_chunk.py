@@ -2,6 +2,8 @@
 bookkeeping, and JSON persistence)."""
 import json
 
+import pytest
+
 from chunk import AIR, BUSH, FLOWER, GRASS, GRASS_PATCH, TREE, Chunk
 
 
@@ -254,6 +256,93 @@ def test_load_coerces_creature_field_types_and_drops_broken_entries(tmp_path):
         {"id": 5, "x": 1, "z": 2, "age": 2, "hunger": 3,
          "attack": 1, "sleep": 0.5, "asleep": True}
     ]
+
+
+def test_structures_survive_a_save_load_round_trip(tmp_path):
+    c = Chunk(size=(4, 2, 4))
+    c.fill(GRASS)
+    c.structures = [
+        {"id": 1, "type": "burrow", "x": 2, "z": 3, "age": 2, "contains": []},
+    ]
+    c.next_structure_id = 4
+    path = tmp_path / "structures.wrld"
+
+    c.save(str(path))
+    loaded = Chunk.load(str(path))
+
+    assert loaded.structures == c.structures
+    assert loaded.next_structure_id == 4
+
+
+def test_load_leaves_structures_empty_for_a_file_without_them(tmp_path):
+    raw = {"version": 1, "size": [2, 2, 2], "fill": "grass", "overrides": {}}
+    path = tmp_path / "no_structures.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert loaded.structures == []
+    assert loaded.next_structure_id == 0
+
+
+def test_load_drops_structures_missing_an_id_type_or_position(tmp_path):
+    raw = {"version": 2, "size": [4, 2, 4], "fill": "grass", "overrides": {},
+           "structures": [
+               {"id": 1, "type": "burrow", "x": 1, "z": 1, "age": 2, "contains": []},
+               {"id": 2, "x": 1, "z": 2},                       # no type
+               {"id": 3, "type": "burrow", "z": 2},             # no x
+               {"type": "burrow", "x": 0, "z": 0},              # no id
+               {"id": 5, "type": "burrow", "x": 1, "z": 1, "contains": "nope"},
+               "junk",
+           ]}
+    path = tmp_path / "messy_structures.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert [s["id"] for s in loaded.structures] == [1]
+
+
+def test_load_derives_next_structure_id_from_the_highest_saved_id(tmp_path):
+    raw = {"version": 2, "size": [2, 2, 2], "fill": "grass", "overrides": {},
+           "structures": [{"id": 8, "type": "burrow", "x": 0, "z": 0, "age": 1}],
+           "next_structure_id": 3}
+    path = tmp_path / "stale_structure_id.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert Chunk.load(str(path)).next_structure_id == 8
+
+
+def test_a_creature_home_round_trips_including_null(tmp_path):
+    c = Chunk(size=(2, 2, 2))
+    c.fill(GRASS)
+    c.creatures = {"rat": [
+        {"id": 1, "x": 0, "z": 0, "home": 4, "home_need": 0.0},
+        {"id": 2, "x": 1, "z": 1, "home": None, "home_need": 1.5},
+    ]}
+    path = tmp_path / "homes.wrld"
+
+    c.save(str(path))
+    loaded = Chunk.load(str(path))
+
+    assert loaded.creatures["rat"][0]["home"] == 4
+    assert loaded.creatures["rat"][1]["home"] is None
+    assert loaded.creatures["rat"][1]["home_need"] == 1.5
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_an_empty_home_is_read_as_no_home_rather_than_dropping_the_creature(
+    tmp_path, value
+):
+    raw = {"version": 2, "size": [2, 2, 2], "fill": "grass", "overrides": {},
+           "creatures": {"rat": [{"id": 1, "x": 0, "z": 0, "home": value}]}}
+    path = tmp_path / "empty_home.wrld"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = Chunk.load(str(path))
+
+    assert len(loaded.creatures["rat"]) == 1
+    assert loaded.creatures["rat"][0]["home"] is None
 
 
 def test_load_defaults_the_clock_when_the_time_section_is_absent(tmp_path):

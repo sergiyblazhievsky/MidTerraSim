@@ -134,6 +134,18 @@
       }
     }
   ],
+  "structures": [
+    {
+      "name": "burrow",
+      "tags": ["structure", "shelter"],
+      "texture": "textures/burrow_grass_64.png",
+      "render": "surface",
+      "initial_age": 2,
+      "break_chance": 0.2,
+      "dwellers": ["rat", "rabbit"],
+      "contains": []
+    }
+  ],
   "creatures": [
     {
       "name": "rat",
@@ -152,7 +164,8 @@
       "attack": 1,
       "initial_hunger": 3,
       "sleep_gain": 0.5,
-      "needs": ["feed", "sleep"],
+      "home_gain": 0.5,
+      "needs": ["feed", "sleep", "home"],
       "diet": ["food"],
       "feed_radius": 5,
       "hunger_per_food": 1,
@@ -177,7 +190,8 @@
       "attack": 1,
       "initial_hunger": 5,
       "sleep_gain": 0.5,
-      "needs": ["feed", "sleep"],
+      "home_gain": 0.5,
+      "needs": ["feed", "sleep", "home"],
       "diet": ["grass", "bush"],
       "feed_radius": 6,
       "hunger_per_food": 1,

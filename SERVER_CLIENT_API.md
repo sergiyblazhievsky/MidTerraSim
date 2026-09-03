@@ -18,7 +18,7 @@ For internal design notes and history, see [`takeover.md`](./takeover.md).
 ## 1. Purpose
 
 `server.py` owns the **authoritative** world/ecosystem state — terrain,
-vegetation, creatures, item drops, seasons, and day/night — and runs every
+vegetation, structures, creatures, item drops, seasons, and day/night — and runs every
 simulation timer whether or not any client is connected. It exposes that
 state to clients over a minimal stdlib-only HTTP/JSON API so that rendering,
 tooling, dashboards, bots, or automated tests can be built as separate,
@@ -112,6 +112,13 @@ per second and renders a collapsible tree:
     ▸ bush (474)
     ▸ flower (454)
     ▸ tree (212)
+▾ Structures (1)
+  ▾ burrow (1)
+      ▾ burrow #1
+          position: (7, 11)
+          age: 2
+          dwellers: rat #1
+          contains: —
 ▾ Creatures (5)
   ▾ rat (5)
       ▾ rat #1
@@ -120,17 +127,21 @@ per second and renders a collapsible tree:
           hunger: 3
           sleep: 0
           asleep: false
-        ▾ needs (2)
+          home: #1
+        ▾ needs (3)
             feed: 0
             sleep: 0
+            home: 0
       ▸ rat #2 ... #5
 ▸ Drops (0)
 ```
 
-Vegetation and drops are grouped by `type`/`item`; creatures are grouped by
-`type` and then broken out per-instance, each showing its raw stats plus a
-nested `needs` group with the server's *currently computed* need values (see
-`creatures[].needs` in §5). Expand/collapse state is preserved across the
+Vegetation and drops are grouped by `type`/`item`; structures and creatures
+are grouped by `type` and then broken out per-instance, each showing its raw
+stats — creatures add a nested `needs` group with the server's *currently
+computed* need values (see `creatures[].needs` in §5), and structures list
+the creatures currently calling them home (resolved from `creatures[].home`,
+since the structure itself doesn't carry a dweller list). Expand/collapse state is preserved across the
 1-second poll (tracked client-side by a stable `data-key` per node), so the
 tree doesn't jump around while you're inspecting it.
 
@@ -238,6 +249,7 @@ are plain JSON numbers (ints unless noted); all coordinates are integers.
 {
   "revision": 1234,
   "vegetation_revision": 12,
+  "structure_revision": 3,
   "chunk": {
     "size": [100, 100, 100],
     "surface_y": 99
@@ -256,10 +268,13 @@ are plain JSON numbers (ints unless noted); all coordinates are integers.
   "vegetation": [
     { "x": 12, "z": 7, "block_id": 2, "type": "flower", "age": 1 }
   ],
+  "structures": [
+    { "id": 1, "type": "burrow", "x": 7, "z": 11, "age": 2, "contains": [] }
+  ],
   "creatures": [
     { "id": 3, "type": "rat", "x": 10, "z": 44,
-      "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false,
-      "needs": { "feed": 1, "sleep": 0.5 } }
+      "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false, "home": 1,
+      "needs": { "feed": 1, "sleep": 0.5, "home": 0 } }
   ],
   "drops": [
     { "id": 9, "item": "berry", "count": 2, "x": 5, "z": 5, "age": 3.2 }
@@ -273,10 +288,12 @@ are plain JSON numbers (ints unless noted); all coordinates are integers.
 |-------|------|-----------|
 | `revision` | int | Monotonic counter, incremented once per simulation tick (`server.tick_rate` times/second, e.g. 20/s by default). Starts at `0` on server start. Use it as a cheap "has anything changed since I last polled" test — compare to the last value you applied. It resets to `0` if the server process is restarted (see §8). |
 | `vegetation_revision` | int | Separate monotonic counter, incremented **only** when a flora block actually changes (grows a stage, dies, spawns, or is attacked/eaten down). Bumped roughly once per `cycle_length` seconds (or immediately on a flower being attacked). Use this to decide when to rebuild vegetation meshes/lists, independent of the much more frequent `revision`. Also resets to `0` on restart. |
+| `structure_revision` | int | Same idea for structures: bumped only when one is built, damaged, or collapses. Structures change far less often than flora, so gate your structure mesh rebuilds on this. Also resets to `0` on restart. |
 | `chunk` | object | Static-for-the-session terrain metadata (see below) |
 | `time` | object | Season/day/day-night-phase clock (see below) |
 | `terrain` | object | Ground texture reference (see below) |
 | `vegetation` | array | One entry per living flora block currently on the map (see below) |
+| `structures` | array | One entry per standing structure, e.g. a burrow (see below) |
 | `creatures` | array | One entry per living creature instance (see below) |
 | `drops` | array | One entry per un-expired, un-collected item drop on the ground (see below) |
 
@@ -285,7 +302,7 @@ are plain JSON numbers (ints unless noted); all coordinates are integers.
 | Field | Type | Semantics |
 |-------|------|-----------|
 | `size` | `[int, int, int]` | World dimensions as `[x, y, z]` (JSON array; matches `Chunk.size`). The demo world generator always produces a cube, e.g. `[100, 100, 100]`, but don't assume `x == y == z`. |
-| `surface_y` | int | The single Y-level (`size[1] - 1`) at which all terrain, vegetation, and creatures currently live — see §9 for the flatness assumption this implies. |
+| `surface_y` | int | The single Y-level (`size[1] - 1`) at which all terrain, vegetation, structures, and creatures currently live — see §9 for the flatness assumption this implies. |
 
 This object is effectively constant while the server is running (it only
 changes if the world file itself is regenerated and the server restarted).
@@ -330,12 +347,35 @@ There is **no** entry for empty/bare-ground/air tiles — the array only lists
 occupied flora positions, so its length is proportional to how much
 vegetation exists, not to world size.
 
+### `structures[]` — one entry per standing structure
+
+```json
+{ "id": 1, "type": "burrow", "x": 7, "z": 11, "age": 2, "contains": [] }
+```
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `id` | int | Stable per-instance identifier (same guarantees as `creatures[].id`), assigned when the structure is built. This is the value a creature's `home` points at. Persisted, so it survives a restart. |
+| `type` | string | Structure definition name from [`entities.json`](./entities.json)'s `structures[]` (currently only `"burrow"`) — look it up for `texture`/`render` metadata |
+| `x`, `z` | int | Tile position. **At most one structure per tile**, so `(x, z)` is also unique across this array. |
+| `age` | int | Remaining seasonal hits it can survive. Each season start it has a `break_chance` of losing 1; at `0` it collapses and disappears from this array. |
+| `contains` | array | The dwellers' larder. Reserved for creatures stashing food — persisted across saves, but nothing writes to it yet, so expect `[]`. |
+
+Structures are **not** terrain blocks: they sit on a tile alongside whatever
+vegetation is there. Render them as a surface texture *above* the ground and
+ground cover so the burrow visually replaces the tile it was dug into (that's
+what `render: "surface"` in the definition means), and keep drawing the
+vegetation on that tile as normal.
+
+Who lives in one isn't on the structure — read it from the other direction via
+`creatures[].home`.
+
 ### `creatures[]` — one entry per living creature instance
 
 ```json
 { "id": 3, "type": "rat", "x": 10, "z": 44,
-  "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false,
-  "needs": { "feed": 1, "sleep": 0.5 } }
+  "age": 2, "hunger": 3, "sleep": 0.5, "asleep": false, "home": 1,
+  "needs": { "feed": 1, "sleep": 0.5, "home": 0 } }
 ```
 
 | Field | Type | Semantics |
@@ -347,7 +387,8 @@ vegetation exists, not to world size.
 | `hunger` | int | Current hunger/satiation counter, `0`..`initial_hunger` (from `entities.json`); decreases food need, increases (up to the cap) when eating |
 | `sleep` | float | Current sleep-need accumulator. **Not capped/thresholded** — it just competes against `feed` need for priority each move tick; resets to `0.0` at dawn or immediately on waking. Present (defaulting to `0.0`) even for creature types that don't define a `sleep` need. |
 | `asleep` | bool | `true` while the creature has chosen to sleep (stops moving at night); always resets to `false` at dawn. Client should swap to the definition's `sleep_texture` while this is `true` (see §9). |
-| `needs` | object | The server's **currently computed** need→priority map for this instance (same values `_creature_move` uses to decide behavior this tick), keyed by whichever needs are listed in the creature's `entities.json` definition (e.g. `{"feed": 1, "sleep": 0.5}`). `feed` is `max(0, initial_hunger - hunger)`; `sleep` mirrors the `sleep` field but reads as `0` while `asleep` is `true`. A creature with no configured needs reports `{}`. This is derived/informational — you don't need it to render the world, only to inspect *why* a creature is behaving a certain way (see the `/` inspector page, §4a). |
+| `home` | int \| `null` | The `structures[].id` this creature dwells in, or `null` while homeless. Several creatures may share one id. Persisted, and cleared automatically if that structure collapses — so an id here always matches an entry in `structures[]` within the same snapshot. |
+| `needs` | object | The server's **currently computed** need→priority map for this instance (same values `_creature_move` uses to decide behavior this tick), keyed by whichever needs are listed in the creature's `entities.json` definition (e.g. `{"feed": 1, "sleep": 0.5, "home": 0}`). `feed` is `max(0, initial_hunger - hunger)`; `sleep` mirrors the `sleep` field but reads as `0` while `asleep` is `true`; `home` is the accrued want for shelter, reading `0` whenever `home` is set. A creature with no configured needs reports `{}`. This is derived/informational — you don't need it to render the world, only to inspect *why* a creature is behaving a certain way (see the `/` inspector page, §4a). |
 
 Creatures never appear/disappear mid-array-shuffle — entries are only added
 (birth on each season change) or removed (death from starvation/old age/winter) between
@@ -374,24 +415,29 @@ snapshots; existing IDs' fields update in place.
 | Concept | Resets when | Use it to… |
 |---|---|---|
 | `creatures[].id` | Never (persisted) | Track/diff individual creatures across polls |
+| `structures[].id` | Never (persisted) | Track/diff structures; resolve `creatures[].home` |
 | `drops[].id` | Server restart | Track/diff individual drops across polls |
 | `revision` | Server restart | Detect *any* tick has happened / detect restart (goes backwards) |
 | `vegetation_revision` | Server restart | Detect flora actually changed (rebuild vegetation meshes only when needed) |
+| `structure_revision` | Server restart | Detect a structure was built/damaged/collapsed (rebuild structure meshes only when needed) |
 
 What the world file (`chunks/chunk_0_0.wrld`) keeps across a restart:
 
 - Terrain, vegetation, and their ages.
-- **All live fauna** — each creature's tile, age, hunger, sleep state and
-  `id`, plus the id counter, so a reloaded world neither reseeds its
+- **All live fauna** — each creature's tile, age, hunger, sleep state, `home`
+  and `id`, plus the id counter, so a reloaded world neither reseeds its
   population nor reissues an id that's already in use.
+- **All standing structures** — tile, `age`, `contains` and `id`, likewise
+  with their counter. A `home` pointing at a structure that didn't survive
+  the round trip is cleared on load, so the two never disagree.
 - **The simulation clock** — `time.season`, `time.cycle` and `time.day` all
   resume where they left off, so a restart no longer snaps the world back to
   spring, day 0.
 
 What it does *not* keep: item drops (their `age` is measured against
 simulation time, so they're dropped rather than resurrected with a bogus
-lifetime), `drops[].id`, both revision counters, and `speed_multiplier`. A
-fresh server process therefore starts both revisions at `0` and reissues drop
+lifetime), `drops[].id`, all three revision counters, and `speed_multiplier`.
+A fresh server process therefore starts the revisions at `0` and reissues drop
 IDs from near `1`.
 
 `time.is_day` and `time.phase` are derived from the wall clock, not saved:
@@ -486,6 +532,18 @@ def get_stage(vdef, age):
 4. Use that stage's `texture` (and `height`, if you're building 3D geometry)
    for rendering.
 
+### Structure texture
+
+```python
+sdef = structure_defs_by_name[structure_entry["type"]]
+texture = sdef["texture"]      # sdef["render"] == "surface"
+```
+
+Structures have no stages — one texture per type, laid flat on the tile like
+ground-cover flora but drawn *above* it. Tolerate a missing/unloadable
+texture (fall back to a flat colour): the art is referenced by name from
+`entities.json`, so a definition can point at a file you don't have yet.
+
 ### Creature awake/asleep texture
 
 ```python
@@ -554,9 +612,9 @@ reasonable starting point; tune to your rendering cadence and network).
 
 ### Detect server restart via `revision` going backwards
 
-Because `revision` (and `vegetation_revision`, and every entity `id`) resets
-to near-zero when the server process restarts, a simple and reliable
-"fresh session" detector is:
+Because `revision` (and the other revision counters) resets to near-zero when
+the server process restarts, a simple and reliable "fresh session" detector
+is:
 
 ```
 if new_snapshot.revision < last_applied_revision:
@@ -574,6 +632,8 @@ decrease relative to the last value you applied.
 - Only rebuild vegetation meshes/lists when `vegetation_revision` changes
   (it changes far less often than `revision` — roughly once per
   `cycle_length` seconds, versus every tick).
+- Likewise gate structure meshes on `structure_revision`, which changes even
+  more rarely (only when a creature builds one, or a season damages one).
 - Diff `creatures[]`/`drops[]` by `id` every time `revision` changes: keep a
   local map from `id → your-entity`, add new IDs, update existing ones
   in-place, and remove/destroy any local entity whose `id` is no longer

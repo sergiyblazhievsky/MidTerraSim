@@ -3,8 +3,8 @@
 Handoff document for continuing work in a new chat. Last updated 2026-09-03
 (rabbits, per-season reproduction, grass as a soft under-layer, player
 fall-through fix — see [Gotchas](#gotchas) before touching player height —
-world-file persistence of fauna + the simulation clock, and a data-driven
-`feed_radius`).
+world-file persistence of fauna + the simulation clock, a data-driven
+`feed_radius`, and burrows/the `home` need).
 
 ---
 
@@ -30,25 +30,30 @@ Requirements: `pip install ursina pillow`
 | File | Role |
 |------|------|
 | `server.py` | Headless, no Ursina import. Authoritative `Chunk`/ecology state, all timers, HTTP API (`/health`, `/state`, `/admin`, `/save`, `/admin/speed_multiplier`), persistence. |
-| `main.py` | Ursina UI client. Polls `/state` on a background thread, renders terrain/vegetation/creatures/drops from the snapshot, local player controls + HUD. No simulation logic. |
+| `main.py` | Ursina UI client. Polls `/state` on a background thread, renders terrain/vegetation/structures/creatures/drops from the snapshot, local player controls + HUD. No simulation logic. |
 
 ### Data files
 
 | File | Role |
 |------|------|
 | `config.json` | Timing, seasons, `drop_lifetime` — hot-reloaded every frame |
-| `entities.json` | Items, vegetation, creatures — loaded at startup |
+| `entities.json` | Items, vegetation, structures, creatures — loaded at startup |
 | `chunks/chunk_0_0.wrld` | Saved world, format `version: 2` (gitignored) |
 
 ### World file persistence
 
 `Chunk` (in `chunk.py`) owns the `.wrld` format and saves terrain,
-`vegetation_ages`, **fauna, and the simulation clock**: `creatures` is
-`{name: [instance, ...]}` keyed by `entities.json` creature name, plus a
-`next_creature_id` counter and a `time` section (`cycle`/`season`/`day`).
+`vegetation_ages`, **fauna, structures, and the simulation clock**:
+`creatures` is `{name: [instance, ...]}` keyed by `entities.json` creature
+name, `structures` is a flat list keyed by `type`, each with its own id
+counter, plus a `time` section (`cycle`/`season`/`day`).
 
-- Server side: `_load_or_seed_creatures()` + `_restore_clock()` on startup,
-  `_store_creatures_in_chunk()` + `_store_clock_in_chunk()` on every `save()`.
+- Server side: `_load_or_seed_creatures()` + `_restore_structures()` +
+  `_restore_clock()` on startup; `_store_creatures_in_chunk()` +
+  `_store_structures_in_chunk()` + `_store_clock_in_chunk()` on every `save()`.
+- A saved structure of a type that's gone from `entities.json` is dropped on
+  load, and `_evict_dangling_homes()` then clears any `home` pointing at it,
+  so a creature's `home` always resolves to a live structure.
 - A saved season is validated against `config.json`; an unknown name warns and
   falls back to `DEFAULT_SEASON`. The four default seasons are always merged
   into the config, so that fallback can't itself `KeyError`.
@@ -88,10 +93,21 @@ with `World.snapshot()` and `make_handler()` in `server.py`.
 Grass uses `stage.render: "surface"` (flat tile texture over soil); other flora
 default to `"cross"` (vertical billboard).
 
-**Creatures** — rat + rabbit with `needs: ["feed", "sleep"]`. Rat
+**Creatures** — rat + rabbit with `needs: ["feed", "sleep", "home"]`. Rat
 `diet: ["food"]` (item drops + flower attacks). Rabbit
 `diet: ["grass", "bush"]` (eat grass cover, else browse bushes). Both declare
-`feed_radius` (rat 5, rabbit 6), which caps the food search on either path.
+`feed_radius` (rat 5, rabbit 6), which caps the food search on either path,
+and `home_gain: 0.5`, the per-day want for shelter while homeless.
+
+**Structures** — burrow, the first one. Not a block: it lives on a tile
+next to whatever vegetation is there, rendered as a `"surface"` quad above
+the ground and grass. `dwellers: ["rat", "rabbit"]` (matched by creature name
+*or* tag) decides who may live in it; `initial_age: 2` and
+`break_chance: 0.2` drive seasonal weathering; `contains` is a persisted but
+so-far-unused larder for dwellers stashing food.
+
+Texture is `textures/burrow_grass_64.png` — see [Texture Assets](#texture-assets),
+it isn't in the repo yet.
 
 Block IDs: `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRASS_PATCH=5`
 
@@ -102,24 +118,36 @@ Block IDs: `AIR=0`, `GRASS=1` (bare soil), `FLOWER=2`, `BUSH=3`, `TREE=4`, `GRAS
 - Expire after `drop_lifetime` seconds; no auto-pickup
 - Eating handled only by creature feed AI
 
-### Creature needs / feed + sleep AI
+### Creature needs / feed + sleep + home AI
 
-Rats currently define `needs: ["feed", "sleep"]`. Each movement tick per
-fauna instance:
+Rat and rabbit both define `needs: ["feed", "sleep", "home"]`. Each movement
+tick per fauna instance:
 
 1. `_compute_creature_needs()` — `feed` = `initial_hunger - hunger`; `sleep`
-   = `0` if already `asleep`, else the running `sleep` accumulator
+   = `0` if already `asleep`, else the running `sleep` accumulator; `home`
+   = `0` if it has a home, else the running `home_need` accumulator
 2. `_pick_highest_need()` — highest value task wins, or none if all ≤ 0
-3. `_creature_move()` — execute the winning task (`sleep`/`feed`) or random walk
+3. `_creature_move()` — execute the winning task (`sleep`/`feed`/`home`) or
+   random walk
+
+Needs compete purely by value, which sets the de-facto priority: `feed`
+grows 1/day against `home`'s 0.5/day, so a hungry creature always eats
+before it digs.
 
 **Feed priority:**
 1. Eat food on same tile (`_resolve_diet` → items with matching tags/names)
 2. Attack flower on same tile
-3. Step toward nearest food drop (5 block radius)
-4. Step toward nearest dead flower, then live flower
+3. Step toward nearest food drop within `feed_radius`
+4. Step toward nearest dead flower, then live flower — same radius
 5. Random move
 
 Diet `"food"` resolves to seed, berry, meat via item tags.
+
+**Home (`_act_home`):** claims the tile the creature is standing on — adopt
+the structure already there if `dwellers` allows it, else build one (never
+two on a tile). Sets `home` to that structure's id and zeroes the
+accumulator. A collapsing structure clears its dwellers' `home`, so they
+start wanting one again.
 
 **Sleep:** no threshold — it's a plain value that competes with `feed` for
 priority. Each night movement cycle a creature is awake, `sleep` increases
@@ -167,7 +195,8 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 | Entity loading | `load_entities()`, `_veg_with_tag()`, `_items_with_tag()`, `_resolve_diet()` |
 | World drops | `_spawn_drop()`, `_drop_from()`, `_update_drops()` |
 | Simulation | `_sim_step()`, `_count_kind_near()`, `tick()` |
-| Creature AI | `_compute_creature_needs()`, `_act_feed()`, `_act_feed_plants()`, `_feed_radius()`, `_creature_move()`, `_eat_food_at_block()` |
+| Creature AI | `_compute_creature_needs()`, `_act_feed()`, `_act_feed_plants()`, `_feed_radius()`, `_act_home()`, `_creature_move()`, `_eat_food_at_block()` |
+| Structures | `_resolve_home_structure()`, `_can_dwell()`, `_structure_at()`, `_build_structure()`, `_remove_structure()`, `_break_structures()`, `_settle_home()` |
 | Lifecycle | `_on_day_start()`, `_on_season_start()`, `_spawn_creature_at()`, `_remove_creature()` |
 | Fauna persistence | `_load_or_seed_creatures()`, `_restore_creature_type()`, `_seed_creature_type()`, `_store_creatures_in_chunk()`, `save()` |
 | Clock persistence | `_restore_clock()`, `_store_clock_in_chunk()`, `DEFAULT_SEASON`, `DAY_FRACTION` |
@@ -179,7 +208,8 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 |------|-----------|
 | Networking | `ServerClient` (background polling thread) |
 | World build | `_build_world()`, `_reset_world_state()` (on server-restart detection) |
-| Sync from snapshot | `_apply_snapshot()`, `_rebuild_vegetation()`, `_sync_creatures()`, `_sync_drops()` |
+| Sync from snapshot | `_apply_snapshot()`, `_rebuild_vegetation()`, `_rebuild_structures()`, `_sync_creatures()`, `_sync_drops()` |
+| Surface layers | `build_surface_mesh(entries, sy, lift)` — `GRASS_LIFT` (0.01) then `STRUCTURE_LIFT` (0.02) stack above the terrain top so a burrow covers the grass it's dug into |
 | Visual-only timers | `_update_lighting_and_bob()` (day/night + drop bob extrapolation between polls) |
 
 ---
@@ -231,6 +261,7 @@ frame times spike from actual mesh building.
 - **16×16** — ground tiles (`soil*.png`, `grass.png` surface cover), drop icons (`*_16.png`)
 - **64×64 cross** — vegetation billboards (`*_xcross_64.png`) for flower/bush/tree
 - Grass patches are **not** cross-billboards; they use opaque `textures/grass.png` as a flat surface mesh
+- Structures are flat surface meshes too, one layer above grass — burrow uses `textures/burrow_grass_64.png`. **That file isn't in the repo yet**; `main.py` falls back to a flat brown quad when `load_texture` returns `None`, so a missing structure texture degrades instead of breaking
 - `generate_chunk.py` also generates legacy `textures/seed.png`; runtime drops use `*_16.png`
 
 ---
@@ -252,7 +283,7 @@ frame times spike from actual mesh building.
 13. Replaced default green ground with seasonal soil textures (`soil.png` / `soil_fall.png` / `soil_winter.png`)
 14. Added decorative grass vegetation (`GRASS_PATCH=5`, season-gated spawn, world-gen fills bare soil)
 15. Inspector Vegetation section filters out `type === 'grass'` (display-only; still in `/state`)
-16. Grass rendering switched from cross-billboard to surface decal: `stage.render: "surface"` + `textures/grass.png`, `build_surface_veg_mesh` in `main.py`; removed `grass_xcross_64.png`
+16. Grass rendering switched from cross-billboard to surface decal: `stage.render: "surface"` + `textures/grass.png`, `build_surface_mesh` (then named `build_surface_veg_mesh`) in `main.py`; removed `grass_xcross_64.png`
 17. Client eye height pinned to `PLAYER_EYE_HEIGHT = 2.0` (camera_pivot re-asserted on world build); walkable floor top at `floor_top(SY) = SY + 0.6`
 18. Drops raised to `_drop_center_y()` so the whole billboard clears the ground and grass decal (previously half-buried at `SY + 0.52`)
 19. Vegetation stage heights fixed to flower 1 / bush 2 / tree 4 — the `max_age: 99` stages (used by *fresh* plants, since age counts down) were still set to height 1
@@ -263,7 +294,8 @@ frame times spike from actual mesh building.
 24. Fauna is now persisted in the world file (`.wrld` format `version: 2`) — creatures were previously reseeded on every server start while vegetation survived
 25. The simulation clock (season/cycle/day) is persisted too, so a restart no longer snaps the world back to spring day 0
 26. `feed_radius` is now data-driven for rats too (was hardcoded 5 in `_find_nearest_food_drop`/`_find_nearest_flower`); both feed paths read it through `_feed_radius()`
-27. Added [`roadmap.md`](./roadmap.md) backlog; linked from README
+27. Added `structures` as a third entity category, starting with the **burrow**: rats/rabbits gain a `home` need, dig or adopt one where they stand, and get evicted when a season collapses it
+28. Added [`roadmap.md`](./roadmap.md) backlog; linked from README
 
 ## Session Work Log (2026-09-02)
 
@@ -280,7 +312,10 @@ frame times spike from actual mesh building.
 
 ## Likely Next Steps
 
-- Extend `needs` beyond `feed`/`sleep` (thirst, shelter, etc.)
+- Fill in the burrow `contains` larder — dwellers hauling food home to
+  preserve it (the field already persists; nothing writes to it)
+- Sleeping/breeding inside a burrow rather than wherever the creature stands
+- Extend `needs` beyond `feed`/`sleep`/`home` (thirst, etc.)
 - Predators (fox/wolf) — needs a new "hunt" behavior; the plant-diet path
   (`_act_feed_plants`) is the closest existing template
 - Align `generate_chunk.py` initial spawn order with runtime (flower first vs last)
@@ -300,12 +335,13 @@ frame times spike from actual mesh building.
 ```json
 {
   "name": "rat",
-  "needs": ["feed", "sleep"],
+  "needs": ["feed", "sleep", "home"],
   "diet": ["food"],
   "feed_radius": 5,
   "initial_hunger": 3,
   "attack": 1,
   "sleep_gain": 0.5,
+  "home_gain": 0.5,
   "avoids_block_tag": "tree",
   "reproduce_count": [1, 6]
 }
@@ -314,15 +350,35 @@ frame times spike from actual mesh building.
 ```json
 {
   "name": "rabbit",
-  "needs": ["feed", "sleep"],
+  "needs": ["feed", "sleep", "home"],
   "diet": ["grass", "bush"],
   "feed_radius": 6,
   "initial_hunger": 5,
   "initial_age": 3,
   "attack": 1,
   "sleep_gain": 0.5,
+  "home_gain": 0.5,
   "avoids_block_tag": "tree",
   "reproduce_count": [2, 3],
   "contains": [{ "item": "meat", "count": [2, 3] }]
+}
+```
+
+## Quick Reference: Structure Configs
+
+Per-instance state lives in `world_structures` (`id`/`type`/`x`/`z`/`age`/
+`contains`); the definition below only seeds it. A creature's `home` holds
+the instance `id`, or `None` while homeless.
+
+```json
+{
+  "name": "burrow",
+  "tags": ["structure", "shelter"],
+  "texture": "textures/burrow_grass_64.png",
+  "render": "surface",
+  "initial_age": 2,
+  "break_chance": 0.2,
+  "dwellers": ["rat", "rabbit"],
+  "contains": []
 }
 ```

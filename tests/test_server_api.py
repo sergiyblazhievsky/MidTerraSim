@@ -64,6 +64,7 @@ def test_state_returns_a_full_snapshot(running_server):
     assert status == 200
     assert body["chunk"]["size"] == [world.sx, world.sy, world.sz]
     assert "creatures" in body and "vegetation" in body and "drops" in body
+    assert "structures" in body and "structure_revision" in body
 
 
 def test_state_response_has_json_content_type(running_server):

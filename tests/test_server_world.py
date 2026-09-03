@@ -86,6 +86,380 @@ def test_seeded_rabbit_stats_use_entity_defaults(world):
     assert st["attack"] == 1
 
 
+# ── structures: home need and burrow building ────────────────────────────────
+
+def test_creatures_start_homeless_with_no_accrued_need(world):
+    for stats in world.all_creature_stats:
+        for st in stats:
+            assert st["home"] is None
+            assert st["home_need"] == 0.0
+    assert world.world_structures == []
+
+
+def test_resolve_home_structure_matches_a_declared_dweller(world):
+    for cdef in world.creature_defs:
+        assert world._resolve_home_structure(cdef)["name"] == "burrow"
+
+
+def test_resolve_home_structure_matches_a_dweller_by_tag(world):
+    world.structure_defs[0]["dwellers"] = ["small"]  # rat/rabbit tag, not name
+    world.structure_defs_by_name["burrow"]["dwellers"] = ["small"]
+
+    assert world._resolve_home_structure(world.creature_defs[0])["name"] == "burrow"
+
+
+def test_resolve_home_structure_none_when_creature_is_not_a_dweller(world):
+    world.structure_defs[0]["dwellers"] = ["badger"]
+
+    assert world._resolve_home_structure(world.creature_defs[0]) is None
+
+
+def test_home_need_accrues_by_home_gain_each_day_start(world):
+    ci = 0
+    st = world.all_creature_stats[ci][0]
+
+    world._on_day_start()
+    assert st["home_need"] == 0.5
+    world._on_day_start()
+    assert st["home_need"] == 1.0
+
+
+def test_home_need_stops_accruing_once_the_creature_has_a_home(world):
+    ci = 0
+    st = world.all_creature_stats[ci][0]
+    st["home"] = 1
+
+    world._on_day_start()
+
+    assert st["home_need"] == 0.0
+
+
+def test_computed_home_need_is_zero_while_housed(world):
+    cdef = world.creature_defs[0]
+    st = world.all_creature_stats[0][0]
+    st["home_need"] = 3.0
+
+    assert world._compute_creature_needs(cdef, st)["home"] == 3.0
+    st["home"] = 7
+    assert world._compute_creature_needs(cdef, st)["home"] == 0
+
+
+def test_act_home_builds_a_burrow_on_the_current_tile(world):
+    ci = 0
+    cdef = world.creature_defs[ci]
+    before_rev = world.structure_revision
+
+    result = world._act_home(ci, 0, cdef, 2, 3, avoids=set())
+
+    assert result == (2, 3)  # stays put to build
+    assert len(world.world_structures) == 1
+    burrow = world.world_structures[0]
+    assert (burrow["type"], burrow["x"], burrow["z"]) == ("burrow", 2, 3)
+    assert burrow["age"] == 2  # initial_age from entities.json
+    assert burrow["contains"] == []
+    assert world.structure_revision == before_rev + 1
+
+
+def test_act_home_records_the_burrow_id_as_the_creatures_home(world):
+    ci = 0
+    st = world.all_creature_stats[ci][0]
+    st["home_need"] = 2.0
+
+    world._act_home(ci, 0, world.creature_defs[ci], 1, 1, avoids=set())
+
+    assert st["home"] == world.world_structures[0]["id"]
+    assert st["home_need"] == 0.0  # need satisfied
+
+
+def test_creature_move_acts_on_home_when_it_is_the_strongest_need(world):
+    ci = 0
+    st = world.all_creature_stats[ci][0]
+    st["hunger"] = world.creature_defs[ci]["initial_hunger"]  # feed need 0
+    st["sleep"] = 0.0
+    st["home_need"] = 1.0
+
+    result = world._creature_move(ci, 0, world.creature_defs[ci], 4, 4, avoids=set())
+
+    assert result == (4, 4)
+    assert len(world.world_structures) == 1
+    assert st["home"] == world.world_structures[0]["id"]
+
+
+def test_act_home_adopts_an_existing_burrow_instead_of_building_a_second(world):
+    # Only one structure may occupy a tile.
+    ci = 0
+    cdef = world.creature_defs[ci]
+    world._act_home(ci, 0, cdef, 2, 2, avoids=set())
+    existing_id = world.world_structures[0]["id"]
+
+    result = world._act_home(ci, 1, cdef, 2, 2, avoids=set())
+
+    assert result == (2, 2)
+    assert len(world.world_structures) == 1
+    assert world.all_creature_stats[ci][1]["home"] == existing_id
+
+
+def test_act_home_wanders_when_the_tile_holds_a_structure_it_cannot_dwell_in(world):
+    # The rat has a home type available (nest) but is standing on a burrow
+    # that only rabbits may use, and the tile can't hold both.
+    ci = 0
+    cdef = world.creature_defs[ci]
+    world.structure_defs[0]["dwellers"] = ["rabbit"]
+    nest = {"name": "nest", "texture": "textures/nest.png", "render": "surface",
+            "initial_age": 2, "break_chance": 0.2, "dwellers": ["rat"],
+            "contains": []}
+    world.structure_defs.append(nest)
+    world.structure_defs_by_name["nest"] = nest
+    world._build_structure(world.structure_defs[0], 2, 2)   # a rabbits-only burrow
+
+    result = world._act_home(ci, 0, cdef, 2, 2, avoids=set())
+
+    assert result != (2, 2)                       # walks off to build elsewhere
+    assert len(world.world_structures) == 1       # no second structure on the tile
+    assert world.all_creature_stats[ci][0]["home"] is None
+
+
+def test_act_feed_plants_wanders_when_no_plant_in_its_diet_exists(world):
+    ci = 1  # rabbit: diet is grass then bush, and the fixture world has neither
+    world.all_creature_stats[ci][0]["hunger"] = 0
+
+    result = world._act_feed(ci, 0, world.creature_defs[ci], 2, 2, avoids=set())
+
+    assert abs(result[0] - 2) + abs(result[1] - 2) == 1
+
+
+def test_act_home_wanders_when_no_structure_accepts_the_creature(world):
+    ci = 0
+    world.structure_defs.clear()
+    world.structure_defs_by_name.clear()
+
+    result = world._act_home(ci, 0, world.creature_defs[ci], 2, 2, avoids=set())
+
+    assert result != (2, 2)
+    assert world.world_structures == []
+
+
+def test_two_creatures_can_share_one_burrow_as_home(world):
+    ci = 0
+    cdef = world.creature_defs[ci]
+    world._act_home(ci, 0, cdef, 1, 1, avoids=set())
+    burrow_id = world.world_structures[0]["id"]
+
+    world._act_home(ci, 1, cdef, 1, 1, avoids=set())
+
+    homes = [st["home"] for st in world.all_creature_stats[ci][:2]]
+    assert homes == [burrow_id, burrow_id]
+
+
+def test_built_burrows_get_unique_increasing_ids(world):
+    cdef = world.creature_defs[0]
+    world._act_home(0, 0, cdef, 1, 1, avoids=set())
+    world._act_home(0, 1, cdef, 3, 3, avoids=set())
+
+    ids = [s["id"] for s in world.world_structures]
+    assert ids[1] > ids[0]
+    assert len(set(ids)) == 2
+
+
+# ── structures: weathering at season start ───────────────────────────────────
+
+def test_break_structures_damages_a_burrow_when_the_roll_succeeds(world, monkeypatch):
+    world._build_structure(world.structure_defs[0], 1, 1)
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.0)  # always breaks
+
+    world._break_structures()
+
+    assert world.world_structures[0]["age"] == 1
+
+
+def test_break_structures_leaves_a_burrow_alone_when_the_roll_fails(world, monkeypatch):
+    world._build_structure(world.structure_defs[0], 1, 1)
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.99)
+
+    world._break_structures()
+
+    assert world.world_structures[0]["age"] == 2
+
+
+def test_break_structures_uses_the_declared_break_chance(world, monkeypatch):
+    world._build_structure(world.structure_defs[0], 1, 1)
+    # break_chance is 0.2, so a roll of exactly 0.2 must not break it.
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.2)
+
+    world._break_structures()
+
+    assert world.world_structures[0]["age"] == 2
+
+
+def test_a_burrow_is_removed_once_its_age_reaches_zero(world, monkeypatch):
+    world._build_structure(world.structure_defs[0], 1, 1)
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.0)
+
+    world._break_structures()   # age 2 -> 1
+    world._break_structures()   # age 1 -> 0, collapses
+
+    assert world.world_structures == []
+
+
+def test_a_collapsing_burrow_evicts_its_dwellers(world, monkeypatch):
+    ci = 0
+    st = world.all_creature_stats[ci][0]
+    world._act_home(ci, 0, world.creature_defs[ci], 1, 1, avoids=set())
+    assert st["home"] is not None
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.0)
+
+    world._break_structures()
+    world._break_structures()
+
+    assert st["home"] is None
+    # Homeless again, so the want starts building back up.
+    world._on_day_start()
+    assert st["home_need"] == 0.5
+
+
+def test_damaging_a_burrow_does_not_evict_its_dwellers(world, monkeypatch):
+    ci = 0
+    st = world.all_creature_stats[ci][0]
+    world._act_home(ci, 0, world.creature_defs[ci], 1, 1, avoids=set())
+    burrow_id = st["home"]
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.0)
+
+    world._break_structures()
+
+    assert st["home"] == burrow_id
+
+
+def test_season_start_weathers_structures(world, monkeypatch):
+    world._build_structure(world.structure_defs[0], 1, 1)
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.0)
+
+    world._on_season_start("summer")
+
+    assert world.world_structures[0]["age"] == 1
+
+
+def test_break_structures_bumps_the_structure_revision(world, monkeypatch):
+    world._build_structure(world.structure_defs[0], 1, 1)
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.0)
+    before = world.structure_revision
+
+    world._break_structures()
+
+    assert world.structure_revision > before
+
+
+def test_structure_revision_is_untouched_when_nothing_breaks(world, monkeypatch):
+    world._build_structure(world.structure_defs[0], 1, 1)
+    monkeypatch.setattr(server_module.random, "random", lambda: 0.99)
+    before = world.structure_revision
+
+    world._break_structures()
+
+    assert world.structure_revision == before
+
+
+# ── structures: persistence ─────────────────────────────────────────────────
+
+def test_structures_are_restored_from_the_world_file(world):
+    ci = 0
+    world._act_home(ci, 0, world.creature_defs[ci], 3, 4, avoids=set())
+    burrow_id = world.world_structures[0]["id"]
+
+    world.save()
+    reloaded = server_module.World()
+
+    assert len(reloaded.world_structures) == 1
+    burrow = reloaded.world_structures[0]
+    assert (burrow["id"], burrow["type"], burrow["x"], burrow["z"]) == (
+        burrow_id, "burrow", 3, 4)
+    assert burrow["age"] == 2
+
+
+def test_a_creatures_home_survives_a_reload(world):
+    ci = 0
+    world._act_home(ci, 0, world.creature_defs[ci], 3, 4, avoids=set())
+    burrow_id = world.all_creature_stats[ci][0]["home"]
+
+    world.save()
+    reloaded = server_module.World()
+
+    assert reloaded.all_creature_stats[ci][0]["home"] == burrow_id
+
+
+def test_save_writes_structures_into_the_world_file(world, isolated_paths):
+    world._act_home(0, 0, world.creature_defs[0], 2, 5, avoids=set())
+
+    world.save()
+
+    raw = json.loads(isolated_paths["world_path"].read_text(encoding="utf-8"))
+    assert raw["structures"] == [{
+        "id": world.world_structures[0]["id"], "type": "burrow",
+        "x": 2, "z": 5, "age": 2, "contains": [],
+    }]
+    assert raw["next_structure_id"] >= world.world_structures[0]["id"]
+
+
+def test_new_burrows_do_not_reuse_a_restored_id(world):
+    world._act_home(0, 0, world.creature_defs[0], 1, 1, avoids=set())
+    world.save()
+
+    reloaded = server_module.World()
+    reloaded._act_home(0, 1, reloaded.creature_defs[0], 4, 4, avoids=set())
+
+    ids = [s["id"] for s in reloaded.world_structures]
+    assert len(set(ids)) == 2
+
+
+def test_a_home_pointing_at_a_vanished_structure_is_cleared_on_load(world, isolated_paths):
+    world._act_home(0, 0, world.creature_defs[0], 1, 1, avoids=set())
+    world.save()
+    raw = json.loads(isolated_paths["world_path"].read_text(encoding="utf-8"))
+    raw["structures"] = []   # burrow gone, creature still references it
+    isolated_paths["world_path"].write_text(json.dumps(raw), encoding="utf-8")
+
+    reloaded = server_module.World()
+
+    assert reloaded.all_creature_stats[0][0]["home"] is None
+
+
+def test_a_saved_structure_of_an_unknown_type_is_dropped_on_load(world, isolated_paths):
+    world._act_home(0, 0, world.creature_defs[0], 1, 1, avoids=set())
+    world.save()
+    raw = json.loads(isolated_paths["world_path"].read_text(encoding="utf-8"))
+    raw["structures"][0]["type"] = "treehouse"   # no such definition
+    isolated_paths["world_path"].write_text(json.dumps(raw), encoding="utf-8")
+
+    reloaded = server_module.World()
+
+    assert reloaded.world_structures == []
+    assert reloaded.all_creature_stats[0][0]["home"] is None
+
+
+# ── structures: snapshot ────────────────────────────────────────────────────
+
+def test_snapshot_lists_structures_with_expected_fields(world):
+    world._act_home(0, 0, world.creature_defs[0], 2, 2, avoids=set())
+
+    snap = world.snapshot()
+
+    assert len(snap["structures"]) == 1
+    s = snap["structures"][0]
+    assert set(s.keys()) == {"id", "type", "x", "z", "age", "contains"}
+    assert (s["type"], s["x"], s["z"], s["age"]) == ("burrow", 2, 2, 2)
+
+
+def test_snapshot_reports_the_structure_revision_and_creature_home(world):
+    snap = world.snapshot()
+    assert snap["structure_revision"] == 0
+    assert all(c["home"] is None for c in snap["creatures"])
+
+    world._act_home(0, 0, world.creature_defs[0], 2, 2, avoids=set())
+    snap = world.snapshot()
+
+    assert snap["structure_revision"] == 1
+    assert any(c["home"] == snap["structures"][0]["id"] for c in snap["creatures"])
+
+
 # ── clock persistence ────────────────────────────────────────────────────────
 
 def test_a_fresh_world_file_starts_the_clock_at_spring_day_zero(world):
@@ -186,7 +560,7 @@ def test_fauna_is_restored_from_the_world_file_instead_of_reseeded(world):
     world.all_creature_positions[ci] = [(2, 3)]
     world.all_creature_stats[ci] = [{
         "id": 42, "age": 1, "hunger": 2, "attack": 5,
-        "sleep": 0.5, "asleep": True,
+        "sleep": 0.5, "asleep": True, "home": None, "home_need": 1.5,
     }]
 
     world.save()
@@ -195,7 +569,7 @@ def test_fauna_is_restored_from_the_world_file_instead_of_reseeded(world):
     assert reloaded.all_creature_positions[ci] == [(2, 3)]
     assert reloaded.all_creature_stats[ci] == [{
         "id": 42, "age": 1, "hunger": 2, "attack": 5,
-        "sleep": 0.5, "asleep": True,
+        "sleep": 0.5, "asleep": True, "home": None, "home_need": 1.5,
     }]
 
 
@@ -246,7 +620,7 @@ def test_save_writes_live_fauna_into_the_world_file(world, isolated_paths):
     world.all_creature_positions[ci] = [(4, 5)]
     world.all_creature_stats[ci] = [{
         "id": 7, "age": 2, "hunger": 1, "attack": 5,
-        "sleep": 0.0, "asleep": False,
+        "sleep": 0.0, "asleep": False, "home": 3, "home_need": 0.0,
     }]
 
     world.save()
@@ -255,6 +629,7 @@ def test_save_writes_live_fauna_into_the_world_file(world, isolated_paths):
     assert raw["creatures"]["rat"] == [{
         "id": 7, "x": 4, "z": 5, "age": 2, "hunger": 1,
         "attack": 5, "sleep": 0.0, "asleep": False,
+        "home": 3, "home_need": 0.0,
     }]
     assert raw["next_creature_id"] >= 7
 
@@ -1529,7 +1904,8 @@ def test_snapshot_creatures_have_stable_ids_and_expected_fields(world):
     total = sum(len(p) for p in world.all_creature_positions)
     assert len(snap["creatures"]) == total
     c = next(c for c in snap["creatures"] if c["type"] == "rat")
-    assert set(c.keys()) == {"id", "type", "x", "z", "age", "hunger", "sleep", "asleep", "needs"}
+    assert set(c.keys()) == {"id", "type", "x", "z", "age", "hunger", "sleep",
+                             "asleep", "home", "needs"}
     assert any(c["type"] == "rabbit" for c in snap["creatures"])
 
 
@@ -1542,7 +1918,8 @@ def test_snapshot_creatures_include_computed_needs(world):
     snap = world.snapshot()
 
     c = next(c for c in snap["creatures"] if c["id"] == world.all_creature_stats[ci][0]["id"])
-    assert c["needs"] == {"feed": 2, "sleep": 0.5}  # initial_hunger(3) - hunger(1)
+    # feed is initial_hunger(3) - hunger(1); home is 0 until it accrues at day start
+    assert c["needs"] == {"feed": 2, "sleep": 0.5, "home": 0.0}
 
 
 def test_snapshot_drops_include_a_computed_age_in_seconds(world):

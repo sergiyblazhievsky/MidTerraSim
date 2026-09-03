@@ -23,7 +23,8 @@ Status legend: unstarted / in-progress / done (moved to README/takeover)
   render as a flat horizontal quad flush with the terrain top
   (`stage.render: "surface"` + `textures/grass.png`), covering the soil
   tile instead of a short vertical cross-billboard. Implemented in
-  `build_surface_veg_mesh` / `_rebuild_vegetation` in `main.py`.
+  `build_surface_mesh` / `_rebuild_vegetation` in `main.py` (the same helper
+  now also draws structures, one layer higher).
 - [ ] **Switch from flat to generated surface** -- terrain is currently a
   single flat plane at a constant `surface_y` for the whole chunk (both
   `chunk.py`'s data model and `main.py`'s `build_ground_mesh` assume this).
@@ -69,6 +70,24 @@ established by rats.
   animal ecosystem (predator/prey, water, crops) is in place -- humans
   probably depend on several of the above being done first (e.g. crops to
   farm, water to drink, animals to hunt/herd).
+
+## Structures
+
+`entities.json`'s `structures[]` category, rendered as surface quads above
+the ground and driven by the creature `home` need -- see `_act_home` /
+`_break_structures` in `server.py`.
+
+- [x] **Burrows** -- rats and rabbits dig or adopt one where they stand when
+  the `home` need wins, share it freely, and are evicted when a season
+  finally collapses it (`initial_age` + `break_chance`).
+- [ ] **Stock the burrow larder** -- the `contains` field persists but
+  nothing fills it; dwellers should haul food home to preserve it, and
+  presumably eat from it when hungry.
+- [ ] **Actually use the burrow** -- sleeping and reproducing inside it
+  rather than wherever the creature happens to stand, which would also give
+  the `home` need a payoff beyond being satisfied.
+- [ ] **More structure types** -- e.g. nests for birds, dens for predators;
+  `dwellers` already gates who may live in a given type, by name or tag.
 
 ## Flora variety
 

@@ -15,10 +15,15 @@ JSON format:
     "creatures": {              # live fauna, keyed by entities.json name
       "rat": [
         {"id": 3, "x": 10, "z": 44, "age": 2, "hunger": 3,
-         "attack": 1, "sleep": 0.0, "asleep": false}
+         "attack": 1, "sleep": 0.0, "asleep": false,
+         "home": 2, "home_need": 0.0}   # home = structure id, null if none
       ]
     },
     "next_creature_id": 12,     # so ids stay unique across save/load
+    "structures": [             # things creatures build, e.g. burrows
+      {"id": 2, "type": "burrow", "x": 10, "z": 44, "age": 2, "contains": []}
+    ],
+    "next_structure_id": 5,
     "time": {                   # simulation clock; season is an entities/config
       "cycle": 41,              # season name, null when never saved
       "season": "fall",
@@ -28,7 +33,7 @@ JSON format:
 
 Version 1 files (no "creatures"/"next_creature_id"/"time") still load; the
 caller decides whether to seed fauna and where to start the clock when a
-section is absent.
+section is absent. "structures" is likewise optional and simply starts empty.
 """
 
 import json
@@ -60,33 +65,59 @@ def _as_int(value, default):
     except (TypeError, ValueError):
         return default
 
+
+def _as_optional_int(value):
+    """For nullable id references (a creature's `home`): null and "" both mean
+    "none", anything else has to be a usable int."""
+    if value is None or value == '':
+        return None
+    return int(value)
+
+
+def _as_list(value):
+    if not isinstance(value, list):
+        raise ValueError('expected a list')
+    return list(value)
+
 # One saved fauna instance: field -> coercion applied on load, so a
 # hand-edited or older file can't inject strings into the simulation.
 _CREATURE_FIELDS = {
     'id': int, 'x': int, 'z': int, 'age': int, 'hunger': int,
     'attack': int, 'sleep': float, 'asleep': bool,
+    'home': _as_optional_int, 'home_need': float,
+}
+
+# One saved structure instance (a burrow, and whatever comes later).
+# `contains` is the dwellers' larder: persisted, but inert for now.
+_STRUCTURE_FIELDS = {
+    'id': int, 'type': str, 'x': int, 'z': int, 'age': int,
+    'contains': _as_list,
 }
 
 
 class Chunk:
     def __init__(self, size=(100, 100, 100), moisture=0, fertility=0):
-        self.size             = tuple(size)
-        self.moisture         = moisture   # 0-100
-        self.fertility        = fertility  # 0-100
-        self._fill            = AIR
-        self._overrides       = {}   # {(x, y, z): block_id}
-        self.vegetation_ages  = {}  # {(x, z): age}
+        self.size              = tuple(size)
+        self.moisture          = moisture   # 0-100
+        self.fertility         = fertility  # 0-100
+        self._fill             = AIR
+        self._overrides        = {}   # {(x, y, z): block_id}
+        self.vegetation_ages   = {}  # {(x, z): age}
         # {creature_name: [instance dict, ...]} — see _CREATURE_FIELDS. Empty
         # means "this world has no saved fauna", which is distinct from a
         # world whose fauna all died ({"rat": []}).
-        self.creatures        = {}
-        self.next_creature_id = 0
+        self.creatures         = {}
+        self.next_creature_id  = 0
+        # [instance dict, ...] — see _STRUCTURE_FIELDS. Creature-built things
+        # (burrows) that live on a tile without being blocks.
+        self.structures        = []
+        self.next_structure_id = 0
         # Simulation clock. season is None until something saves one; the
         # server decides the starting season in that case (and validates a
         # saved name against config.json's seasons).
-        self.cycle            = 0
-        self.season           = None
-        self.day              = 0
+        self.cycle             = 0
+        self.season            = None
+        self.day               = 0
 
     # ── block access ────────────────────────────────────────────────────────
 
@@ -110,23 +141,32 @@ class Chunk:
         self._overrides.clear()
         self.vegetation_ages.clear()
 
-    # ── fauna ───────────────────────────────────────────────────────────────
+    # ── fauna / structures ──────────────────────────────────────────────────
 
     @staticmethod
-    def normalize_creature(raw):
-        """Coerce one saved fauna instance into the expected field types.
-        Returns None if a required position/identity field is unusable."""
+    def _normalize_instance(raw, fields, required):
+        """Coerce one saved instance into the expected field types. Returns
+        None if any required identity/position field is missing or unusable."""
         inst = {}
-        for field, cast in _CREATURE_FIELDS.items():
+        for field, cast in fields.items():
             if field not in raw:
                 continue
             try:
                 inst[field] = cast(raw[field])
             except (TypeError, ValueError):
                 return None
-        if not all(f in inst for f in ('id', 'x', 'z')):
+        if not all(f in inst for f in required):
             return None
         return inst
+
+    @classmethod
+    def normalize_creature(cls, raw):
+        return cls._normalize_instance(raw, _CREATURE_FIELDS, ('id', 'x', 'z'))
+
+    @classmethod
+    def normalize_structure(cls, raw):
+        return cls._normalize_instance(raw, _STRUCTURE_FIELDS,
+                                       ('id', 'type', 'x', 'z'))
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -177,6 +217,8 @@ class Chunk:
                         for name, instances in self.creatures.items()
                     },
                     "next_creature_id": self.next_creature_id,
+                    "structures": list(self.structures),
+                    "next_structure_id": self.next_structure_id,
                     "time": {
                         "cycle": self.cycle,
                         "season": self.season,
@@ -217,6 +259,16 @@ class Chunk:
             default=0,
         )
         c.next_creature_id = max(int(raw.get("next_creature_id", 0)), highest_id)
+
+        saved_structures = raw.get("structures")
+        c.structures = [inst for inst in (
+            c.normalize_structure(s)
+            for s in (saved_structures if isinstance(saved_structures, list) else [])
+            if isinstance(s, dict)
+        ) if inst is not None]
+        highest_structure_id = max((s["id"] for s in c.structures), default=0)
+        c.next_structure_id = max(int(raw.get("next_structure_id", 0)),
+                                  highest_structure_id)
 
         saved_time = raw.get("time") or {}
         c.cycle  = _as_int(saved_time.get("cycle"), 0)

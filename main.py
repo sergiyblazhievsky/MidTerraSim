@@ -68,6 +68,7 @@ entities_cfg = load_entities()
 veg_defs = {v['block_id']: v for v in entities_cfg.get('vegetation', [])}
 item_defs = {i['name']: i for i in entities_cfg.get('items', [])}
 creature_defs_by_name = {c['name']: c for c in entities_cfg.get('creatures', [])}
+structure_defs_by_name = {s['name']: s for s in entities_cfg.get('structures', [])}
 item_texture_paths = {name: idef.get('texture') for name, idef in item_defs.items() if idef.get('texture')}
 
 ITEM_TEXTURES = {
@@ -218,13 +219,16 @@ def build_veg_mesh(entries, sy):
     return Mesh(vertices=verts, triangles=tris, uvs=uvs, mode='triangle')
 
 
-def build_surface_veg_mesh(entries, sy):
-    """Horizontal quads flush with the terrain top — used for ground-cover
-    flora (grass patches) that should read as a surface texture on the
-    block rather than a vertical plant billboard."""
+def build_surface_mesh(entries, sy, lift=0.01):
+    """Horizontal quads flush with the terrain top — used for anything that
+    reads as a texture painted on the block rather than a vertical billboard:
+    ground-cover flora (grass patches) and structures (burrows).
+
+    `lift` stacks these layers: the ground mesh is at surface_top, grass sits
+    just above it, and a burrow above that so it covers whatever it is dug
+    into."""
     verts, tris, uvs = [], [], []
-    # Slightly above the soil top face to avoid z-fighting with the ground mesh.
-    y = surface_top(sy) + 0.01
+    y = surface_top(sy) + lift
     for e in entries:
         x, z = e['x'], e['z']
         base = len(verts)
@@ -242,6 +246,11 @@ def build_surface_veg_mesh(entries, sy):
 
 def empty_mesh():
     return Mesh(vertices=[], triangles=[], uvs=[], mode='triangle')
+
+
+# Draw order above the terrain top: grass decal, then structures on top of it.
+GRASS_LIFT = 0.01
+STRUCTURE_LIFT = 0.02
 
 
 # ── app setup ─────────────────────────────────────────────────────────────────
@@ -292,6 +301,7 @@ sx = sz = SY = None
 terrain = None
 floor = None
 veg_entities = {}          # (block_id, stage_index) -> Entity
+structure_entities = {}    # structure type name -> Entity
 creature_entities = {}     # creature id -> Entity
 creature_last_tex = {}     # creature id -> last texture path (avoid redundant reloads)
 drop_entities = {}         # drop id -> Entity
@@ -317,6 +327,9 @@ def _reset_world_state():
     for ent in veg_entities.values():
         destroy(ent)
     veg_entities.clear()
+    for ent in structure_entities.values():
+        destroy(ent)
+    structure_entities.clear()
     for ent in creature_entities.values():
         destroy(ent)
     creature_entities.clear()
@@ -332,6 +345,7 @@ def _reset_world_state():
     cur_snapshot = None
     last_terrain_texture = None
     _apply_snapshot.last_veg_rev = None
+    _apply_snapshot.last_structure_rev = None
     print('[client] server session changed (revision reset) — rebuilding world.')
 
 
@@ -357,6 +371,16 @@ def _build_world(snap):
             ent = Entity(model=empty_mesh(), texture=load_texture(stage['texture']), collider=None)
             ent.setTransparency(1)
             veg_entities[(bid, si)] = ent
+
+    for sdef in entities_cfg.get('structures', []):
+        tex = load_texture(sdef['texture']) if sdef.get('texture') else None
+        ent = Entity(model=empty_mesh(), texture=tex, collider=None)
+        if tex is None:
+            # Art not in textures/ yet — a flat colour still reads as a hole
+            # in the ground rather than an untextured white tile.
+            ent.color = color.rgb(0.25, 0.17, 0.10)
+        ent.setTransparency(1)
+        structure_entities[sdef['name']] = ent
 
     # Walkable collider. The cube model is centered, so offset it down by half
     # its thickness to put the top face exactly at floor_top(SY) = SY+0.6 (just
@@ -402,9 +426,22 @@ def _rebuild_vegetation(vegetation_list):
     for key, ent in veg_entities.items():
         entries = groups.get(key, [])
         if modes.get(key, 'cross') == 'surface':
-            ent.model = build_surface_veg_mesh(entries, SY)
+            ent.model = build_surface_mesh(entries, SY, lift=GRASS_LIFT)
         else:
             ent.model = build_veg_mesh(entries, SY)
+
+
+def _rebuild_structures(structure_list):
+    """One mesh per structure type, drawn over the terrain and grass so a
+    burrow replaces the look of whatever tile it was dug into."""
+    groups = {}
+    for s in structure_list:
+        if s['type'] in structure_entities:
+            groups.setdefault(s['type'], []).append({'x': s['x'], 'z': s['z']})
+
+    for type_name, ent in structure_entities.items():
+        ent.model = build_surface_mesh(groups.get(type_name, []), SY,
+                                       lift=STRUCTURE_LIFT)
 
 
 def _drop_center_y(age=0.0):
@@ -492,11 +529,17 @@ def _apply_snapshot(snap):
         _rebuild_vegetation(snap['vegetation'])
         _apply_snapshot.last_veg_rev = snap['vegetation_revision']
 
+    structure_rev = snap.get('structure_revision')
+    if structure_rev != _apply_snapshot.last_structure_rev:
+        _rebuild_structures(snap.get('structures', []))
+        _apply_snapshot.last_structure_rev = structure_rev
+
     _sync_creatures(snap['creatures'])
     _sync_drops(snap['drops'])
 
 
 _apply_snapshot.last_veg_rev = None
+_apply_snapshot.last_structure_rev = None
 
 
 def _apply_day_night_phase(phase):
