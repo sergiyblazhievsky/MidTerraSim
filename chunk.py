@@ -66,6 +66,10 @@ class Chunk:
                 return y
         return -1
 
+    def overrides_at_y(self, y):
+        """Return {(x, z): block_id} for every override at the given y-level."""
+        return {(x, z): bid for (x, y2, z), bid in self._overrides.items() if y2 == y}
+
     def visible_surface(self):
         """Yield (x, y, z, block_id) for the topmost non-air block per column."""
         sx, sy, sz = self.size

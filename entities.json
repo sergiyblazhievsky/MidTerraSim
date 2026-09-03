@@ -1,8 +1,10 @@
 {
   "items": [
-    { "name": "seed",  "tags": ["raw", "food"] },
-    { "name": "berry", "tags": ["raw", "food"] },
-    { "name": "meat",  "tags": ["raw", "food"] }
+    { "name": "seed",  "tags": ["raw", "food"], "texture": "textures/seed_16.png" },
+    { "name": "berry", "tags": ["raw", "food"], "texture": "textures/berry_16.png" },
+    { "name": "meat",  "tags": ["raw", "food"], "texture": "textures/meat_16.png" },
+    { "name": "log",   "tags": ["material"],    "texture": "textures/log_16.png" },
+    { "name": "stick", "tags": ["material"],    "texture": "textures/stick_16.png" }
   ],
   "vegetation": [
     {
@@ -74,7 +76,7 @@
         {
           "max_age": 1,
           "texture": "textures/tree_dry_xcross_64.png",
-          "height": 2.0,
+          "height": 4.0,
           "contains": [
             { "item": "log",   "count": [3, 5] },
             { "item": "stick", "count": [5, 7] }
@@ -120,6 +122,7 @@
       "name": "rat",
       "tags": ["fauna", "small"],
       "texture": "textures/rat_64.png",
+      "sleep_texture": "textures/rat_sleeping_64.png",
       "count": 5,
       "scale": [1.0, 1.0],
       "y_offset": 1.0,
@@ -131,7 +134,8 @@
       "initial_age": 2,
       "attack": 1,
       "initial_hunger": 3,
-      "needs": ["feed"],
+      "sleep_gain": 0.5,
+      "needs": ["feed", "sleep"],
       "diet": ["food"],
       "hunger_per_food": 1,
       "contains": [

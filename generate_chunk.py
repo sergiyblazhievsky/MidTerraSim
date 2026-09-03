@@ -252,8 +252,9 @@ for py in range(16):
 # small darker highlight line down the middle
 for py in range(4, 12):
     seed_img.putpixel((8, py), (140, 105, 55, 255))
+seed_img.save("textures/seed_16.png")
 seed_img.save("textures/seed.png")
-print("Saved textures/seed.png")
+print("Saved textures/seed_16.png")
 
 # ── world ─────────────────────────────────────────────────────────────────────
 os.makedirs("chunks", exist_ok=True)
@@ -339,4 +340,3 @@ n_flowers = sum(1 for v in chunk._overrides.values() if v == FLOWER)
 n_bushes = sum(1 for v in chunk._overrides.values() if v == BUSH)
 n_trees = sum(1 for v in chunk._overrides.values() if v == TREE)
 print(f"Saved chunks/chunk_0_0.wrld  ({n_flowers} flowers, {n_bushes} bushes, {n_trees} trees placed)")
-

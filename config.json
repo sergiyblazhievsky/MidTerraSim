@@ -24,5 +24,17 @@
       "fertility": 10,
       "texture": "grass_winter.png"
     }
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "tick_rate": 20.0,
+    "save_interval": 120.0
+  },
+  "client": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "poll_interval": 0.15,
+    "request_timeout": 2.0
   }
 }

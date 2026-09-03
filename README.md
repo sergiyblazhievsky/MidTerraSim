@@ -1,43 +1,42 @@
 # MidTerraSim
 
-A first-person 3D ecosystem simulation built with [Ursina Engine](https://www.ursinaengine.org/). Walk a 100×100 procedural world while a cellular-automaton simulation drives plant growth, seasonal change, and creature behavior in the background.
+A client/server 3D ecosystem simulation built with [Ursina Engine](https://www.ursinaengine.org/). A headless **server** owns the authoritative world and runs the simulation continuously; a first-person **UI client** connects to it over HTTP, renders the world, and lets you walk around. The two are independent processes — you can start, stop, and restart the UI without touching the running simulation.
 
-## Features
-
-- **Procedural terrain** — 100×100×100 chunk with grass, flowers, bushes, and trees
-- **Seasonal cycles** — Spring, Summer, Fall, Winter with different moisture and fertility values
-- **Plant lifecycle** — age-based growth and death; dry/dead texture variants for aging plants
-- **Day/Night cycle** — 40-second day, 20-second night with ambient lighting transitions
-- **Data-driven entities** — vegetation, items, and creatures defined in `entities.json`
-- **World drops** — dead plants and creatures leave floating item drops with 16×16 icons
-- **Creature needs AI** — rats evaluate hunger-driven `feed` tasks before moving randomly
-- **HUD** — compact top-left overlay showing current season, cycle, day count, and time of day
-- **External config** — simulation timing and season parameters live in `config.json`, editable at runtime
-- **Map viewer** — top-down Tkinter tool for inspecting saved `.wrld` files
-
-## Controls
-
-| Key | Action |
-|-----|--------|
-| WASD | Move |
-| Mouse | Look |
-| Shift | Sprint |
-| Space | Jump |
-| Esc | Save & quit |
-
-## Requirements
+## Architecture
 
 ```
-pip install ursina pillow
+┌─────────────────┐   GET /health          ┌──────────────────────────┐
+│                 │   GET /state           │                          │
+│  main.py (UI)   │ ─────────────────────> │  server.py (headless)    │
+│  Ursina client  │ <───────────────────── │  authoritative world +   │
+│  no simulation  │   JSON snapshot         │  every simulation timer  │
+│                 │   POST /save (manual)   │                          │
+└─────────────────┘                        └──────────────────────────┘
 ```
+
+- **`server.py`** — no Ursina import, console-only. Owns the `Chunk`, all simulation timers (vegetation age/spawn, seasons, day/night, creature movement/needs/feeding/sleep/lifecycle/reproduction, item drops + expiry), and persistence. Keeps simulating whether or not any client is connected. Exposes a small stdlib-only HTTP/JSON API bound to `127.0.0.1` by default.
+- **`main.py`** — Ursina UI/client only. Polls the server's `/state` endpoint on a background thread (so a slow/offline server never freezes rendering), and rebuilds/updates visual entities (terrain, vegetation, creatures, drops) from the snapshot. Runs local first-person controls, camera, chunk-bound clamping, day/night visuals, and the HUD. If the server is unreachable it shows a **DISCONNECTED** banner and keeps retrying automatically; it reconnects on its own once the server is back — no restart of either process needed. Closing the UI (Esc or window close) never saves or shuts down the server.
 
 ## Running
+
+Start the server first, in its own console:
+
+```
+python server.py
+```
+
+Then, independently, start the UI client (any number of times — start it, close it, start it again — the server doesn't care):
 
 ```
 python main.py
 ```
 
-World state is saved to `chunks/chunk_0_0.wrld` on exit. To regenerate a fresh world with procedural textures:
+- The server keeps ticking and saving even with zero clients connected.
+- Closing `main.py` (Esc, or the window's close button) only closes the UI. It does **not** save or stop the server.
+- Stop the server with **Ctrl+C** in its console — it saves the world before exiting.
+- CLI overrides are available on both: `python server.py --host 0.0.0.0 --port 8765`, `python main.py --host 127.0.0.1 --port 8765`.
+
+World state is saved to `chunks/chunk_0_0.wrld` periodically (`server.save_interval` in `config.json`) and on clean shutdown. To regenerate a fresh world with procedural textures:
 
 ```
 python generate_chunk.py
@@ -49,11 +48,42 @@ To inspect a saved world from above:
 python map_viewer.py
 ```
 
+## Controls (UI client)
+
+| Key | Action |
+|-----|--------|
+| WASD | Move |
+| Mouse | Look |
+| Shift | Sprint |
+| Space | Jump |
+| Esc | Close the UI (server keeps running) |
+
+## HTTP API (`server.py`)
+
+`server.py` exposes a small stdlib-only HTTP/JSON API, bound to
+`127.0.0.1:8765` by default (see `server` section of `config.json`):
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | `{"status": "ok", "revision": <int>}` — cheap liveness/poll check |
+| `/state`  | GET | Full renderable world snapshot (terrain/time, vegetation, creatures, drops) |
+| `/save`   | POST | Force an immediate save to `chunks/chunk_0_0.wrld` |
+
+All snapshot reads and mutations are guarded by a single lock, so concurrent
+client requests never race with the simulation tick — `main.py` is just one
+possible client; anyone can poll this API from another process or language.
+
+**➡️ For the full contract** — exact JSON schema and field semantics,
+request/response headers and status codes, thread-safety guarantees,
+`entities.json` texture/stage resolution, coordinate assumptions, polling
+and reconnect recommendations, curl/PowerShell/Python examples, and
+known limitations — see **[`SERVER_CLIENT_API.md`](./SERVER_CLIENT_API.md)**.
+
 ## Configuration
 
 ### `config.json`
 
-Edit at runtime (no rebuild needed):
+Hot-reloaded by the **server** every tick (no restart needed for `cycle_length`, `season_length`, `day_night_cycle`, `drop_lifetime`, `seasons`). The `client` section is read once by `main.py` at startup.
 
 ```json
 {
@@ -66,20 +96,38 @@ Edit at runtime (no rebuild needed):
     "summer": { "moisture": 20, "fertility": 30, "texture": "grass.png" },
     "fall":   { "moisture": 30, "fertility": 40, "texture": "grass_fall.png" },
     "winter": { "moisture": 30, "fertility": 10, "texture": "grass_winter.png" }
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "tick_rate": 20.0,
+    "save_interval": 120.0
+  },
+  "client": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "poll_interval": 0.15,
+    "request_timeout": 2.0
   }
 }
 ```
 
 | Key | Description |
 |-----|-------------|
-| `cycle_length` | Seconds between simulation ticks |
+| `cycle_length` | Seconds between simulation ticks (flora aging/spawn) |
 | `season_length` | Simulation cycles per season |
 | `day_night_cycle` | Seconds for one full day/night loop |
 | `drop_lifetime` | Seconds before uncollected item drops expire |
+| `server.host` / `server.port` | Where the HTTP API binds (default localhost-only) |
+| `server.tick_rate` | Simulation ticks per second (independent of any client) |
+| `server.save_interval` | Seconds between automatic saves |
+| `client.host` / `client.port` | Where `main.py` looks for the server |
+| `client.poll_interval` | Seconds between `/state` polls |
+| `client.request_timeout` | HTTP request timeout for the polling thread |
 
 ### `entities.json`
 
-Defines items, vegetation, and creatures.
+Defines items, vegetation, and creatures. Loaded independently by **both** `server.py` (authoritative rules) and `main.py` (rendering/texture lookups) — unchanged from before.
 
 **Items** — `name`, `tags` (e.g. `raw`, `food` for seed/berry/meat)
 
@@ -115,14 +163,14 @@ All spawns also require a fertility roll (`random 0–100 ≤ chunk.fertility`).
 | Tree | Dead (age ≤ 1) | 3–5 logs, 5–7 sticks |
 | Rat | — | 1 meat |
 
-## Simulation Overview
+## Simulation Overview (server-authoritative)
 
-Each simulation cycle:
+Each simulation cycle (`cycle_length` seconds):
 
 1. Season may advance, updating moisture, fertility, and ground texture
 2. Flora ages and may die when moisture is low; dead plants spawn stage-based item drops
 3. New flora may spawn on empty grass tiles (fertility roll + per-type chance + proximity rules)
-4. Fauna creatures act on needs-driven tasks or move randomly
+4. Fauna creatures act on needs-driven tasks or move randomly (evaluated every `move_interval_day` seconds)
 
 ### Creature feed AI (rats)
 
@@ -134,11 +182,17 @@ When hungry (`feed` need = `initial_hunger - hunger`):
 4. Move toward nearest dead flower, then live flower
 5. Random move if nothing found
 
-When full: random walk only (avoids trees).
+### Creature sleep AI (rats)
+
+Sleep is a plain need value with **no threshold** — it just competes with other needs for priority:
+
+- Each night movement cycle a creature is awake, `sleep` increases by `sleep_gain` (default `0.5`)
+- Whichever need (`feed` or `sleep`) has the higher value wins; if `sleep` wins, the creature stops moving, is marked `asleep`, and the client renders it with `sleep_texture`
+- At the start of each day, `sleep` resets to `0`, `asleep` clears, and the client renders the normal `texture` again
 
 Daily and seasonal events:
 
-- **Day start** — fauna lose 1 hunger (or 1 age if starving)
+- **Day start** — fauna lose 1 hunger (or 1 age if starving); sleeping fauna wake up
 - **Summer start** — fauna reproduce near existing individuals
 - **Winter start** — all fauna lose 1 age
 
@@ -146,12 +200,14 @@ Daily and seasonal events:
 
 ```
 MidTerraSim/
-├── main.py            # Game loop, rendering, simulation logic
-├── chunk.py           # World data model and persistence
+├── server.py          # Headless simulation server: authoritative state, all timers, HTTP API, persistence
+├── main.py            # Ursina UI client: rendering, player controls, HUD — no simulation logic
+├── chunk.py           # World data model and persistence (shared by server + generate_chunk.py)
 ├── generate_chunk.py  # Procedural world and texture generation
 ├── map_viewer.py      # Top-down .wrld file inspector (Tkinter)
-├── config.json        # Runtime simulation timing and seasons
-├── entities.json      # Items, vegetation, and creature definitions
+├── config.json        # Runtime simulation timing, seasons, and server/client host/port/poll options
+├── entities.json      # Items, vegetation, and creature definitions (read by both processes)
+├── SERVER_CLIENT_API.md  # Full HTTP/JSON API contract for building your own client
 ├── takeover.md        # Session handoff notes for continuing development
 ├── chunks/            # Saved world state (.wrld)
 └── textures/          # PNG assets (16×16 and 64×64 variants)
