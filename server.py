@@ -852,6 +852,7 @@ INSPECTOR_HTML = """<!doctype html>
 <style>
   body { background:#111418; color:#ddd; font-family: Consolas, Menlo, monospace; font-size: 14px; margin:0; padding: 18px; }
   h1 { font-size: 16px; margin: 0 0 6px 0; color:#8ecbff; }
+  #worldinfo { color:#ffd479; font-weight: bold; font-size: 15px; margin-bottom: 4px; }
   #status { color:#8fbf8f; margin-bottom: 14px; font-size: 12px; }
   #status.stale { color:#e77676; }
   #admin-panel { margin: 0 0 16px 0; padding: 10px 12px; border: 1px solid #333; border-radius: 4px; background: #171b20; }
@@ -875,6 +876,7 @@ INSPECTOR_HTML = """<!doctype html>
 </head>
 <body>
   <h1>MidTerraSim &mdash; Server Inspector</h1>
+  <div id="worldinfo">Season: &ndash; | Cycle: &ndash; | Day: &ndash;</div>
   <div id="status">connecting&hellip;</div>
   <div id="admin-panel">
     <span class="title">Admin</span>
@@ -993,8 +995,10 @@ INSPECTOR_HTML = """<!doctype html>
         renderVegetation(state) + renderCreatures(state) + renderDrops(state);
 
       const t = state.time;
+      document.getElementById('worldinfo').textContent =
+        `Season: ${t.season.charAt(0).toUpperCase() + t.season.slice(1)}  |  ` +
+        `Cycle: ${t.cycle}  |  Day: ${t.day}  |  ${t.is_day ? 'Day' : 'Night'}`;
       statusEl.textContent =
-        `${t.season} | cycle ${t.cycle} | day ${t.day} | ${t.is_day ? 'day' : 'night'} | ` +
         `revision ${state.revision} | updated ${new Date().toLocaleTimeString()}`;
       statusEl.classList.remove('stale');
     } catch (err) {
