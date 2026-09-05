@@ -401,16 +401,26 @@ def test_act_stock_declines_when_its_burrow_has_collapsed(world):
     assert world._act_stock(ci, 0, world.creature_defs[ci], 5, 5, avoids=set()) is None
 
 
-def test_a_herbivore_never_stocks_because_its_diet_holds_no_items(world):
-    # The rabbit eats grass and bushes, neither of which is a carryable item,
-    # so its stock turn always declines and it moves on to the next need.
+def test_a_herbivore_stocks_the_vegetables_it_eats_but_not_the_rest(world):
+    # The rabbit's diet names the "vegetable" tag, so a carrot is worth hauling
+    # home while a berry from the bush it felled is not on its menu at all.
     ci = 1
     rabbit = world.creature_defs[ci]
     world._spawn_drop("berry", 1, 2, 2)
 
-    assert world._resolve_diet(rabbit) == set()
+    assert world._resolve_diet(rabbit) == {"carrot", "cabbage"}
     assert world._pick_up_drop_at(2, 2, rabbit) is None
     assert world._act_stock(ci, 0, rabbit, 2, 2, avoids=set()) is None
+
+    world._spawn_drop("carrot", 1, 2, 2)
+
+    assert world._pick_up_drop_at(2, 2, rabbit) == "carrot"
+
+
+def test_a_creature_with_no_diet_at_all_hoards_nothing(world):
+    world._spawn_drop("berry", 1, 2, 2)
+
+    assert world._pick_up_drop_at(2, 2, cdef={}) is None
 
 
 def test_act_on_need_ignores_a_task_it_has_no_behavior_for(world):
@@ -1353,6 +1363,67 @@ def test_eat_food_at_block_false_when_creature_has_no_diet(world):
     assert ate is False
 
 
+# ── per-item food value ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("item,gain", [
+    ("carrot", 2),      # declared on the item
+    ("cabbage", 3),
+    ("seed", 1),        # undeclared: the creature's flat hunger_per_food
+    ("nonesuch", 1),    # not an item at all
+])
+def test_item_hunger_gain_prefers_the_items_own_value(world, item, gain):
+    assert world._item_hunger_gain(item, world.creature_defs[0]) == gain
+
+
+def test_item_hunger_gain_falls_back_to_one_without_a_declared_rate(world):
+    assert world._item_hunger_gain("seed", cdef={}) == 1
+    assert world._item_hunger_gain("seed", cdef={"hunger_per_food": 2}) == 2
+
+
+def test_feed_never_pushes_hunger_past_full(world):
+    st = {"hunger": 2}
+    world._feed(st, {"initial_hunger": 3}, 3)
+    assert st["hunger"] == 3
+
+
+def test_a_rat_gets_two_hunger_out_of_one_carrot(world):
+    ci = 0
+    isolate_creature(world, ci, 0)
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    world._spawn_drop("carrot", 1, 4, 4)
+
+    assert world._eat_food_at_block(4, 4, ci, 0, world.creature_defs[ci]) is True
+    assert world.all_creature_stats[ci][0]["hunger"] == 2
+    assert world.world_drops == []
+
+
+def test_one_cabbage_fills_a_rat_from_empty(world):
+    # A cabbage is worth 3 and the rat holds 3, so it eats one and leaves the
+    # rest of the stack standing rather than stuffing itself.
+    ci = 0
+    isolate_creature(world, ci, 0)
+    world.all_creature_stats[ci][0]["hunger"] = 0
+    world._spawn_drop("cabbage", 2, 4, 4)
+
+    world._eat_food_at_block(4, 4, ci, 0, world.creature_defs[ci])
+
+    assert world.all_creature_stats[ci][0]["hunger"] == 3
+    assert world.world_drops[0]["count"] == 1
+
+
+def test_a_passing_creature_picks_up_the_full_value_of_a_vegetable(world):
+    ci = 0
+    isolate_creature(world, ci, 0)
+    world.all_creature_positions[ci][0] = (5, 5)
+    world.all_creature_stats[ci][0].update({"hunger": 0, "asleep": False})
+    world._spawn_drop("carrot", 1, 5, 5)
+
+    world._update_drops()
+
+    assert world.all_creature_stats[ci][0]["hunger"] == 2
+    assert world.world_drops == []
+
+
 # ── nearest-target search + movement primitives ──────────────────────────────
 
 def test_find_nearest_food_drop_returns_closest_within_radius(world):
@@ -1604,8 +1675,16 @@ def test_act_feed_steps_toward_nearby_food_drop_before_attacking_any_flower(worl
 
 def test_resolve_plant_diet_tiers_keeps_declared_order(world):
     tiers = world._resolve_plant_diet_tiers(world.creature_defs[1])
-    assert [[p["name"] for p in tier] for tier in tiers] == [
-        ["carrot", "cabbage"], ["grass"], ["bush"]]
+    assert [[p["name"] for p in tier] for tier in tiers] == [["grass"], ["bush"]]
+
+
+def test_forage_tiers_put_the_plants_it_fells_before_the_ones_it_grazes(world):
+    # The rabbit fells crops for the vegetable and grazes grass/bush for the
+    # mouthful, and a felled crop beats grazing -- so crops lead.
+    tiers = world._forage_tiers(world.creature_defs[1])
+
+    assert [([p["name"] for p in tier], eats) for tier, eats in tiers] == [
+        (["carrot", "cabbage"], False), (["grass"], True), (["bush"], True)]
 
 
 def test_a_tag_diet_entry_becomes_one_tier_of_several_plants(world):
@@ -1706,7 +1785,7 @@ def _plant(world, x, z, bid, age=2):
     world.chunk.vegetation_ages[(x, z)] = age
 
 
-def test_rabbit_browses_a_crop_on_its_own_tile(world):
+def test_rabbit_attacks_a_crop_on_its_own_tile_without_feeding_itself(world):
     cdef, st = _hungry(world, 1, 2, 2)
     _plant(world, 2, 2, CARROT)
 
@@ -1714,10 +1793,10 @@ def test_rabbit_browses_a_crop_on_its_own_tile(world):
 
     assert result == (2, 2)
     assert world.chunk.vegetation_ages[(2, 2)] == 1   # aged by attack
-    assert st["hunger"] == 1
+    assert st["hunger"] == 0   # the vegetable it knocks loose is the meal
 
 
-def test_a_rabbit_browsing_a_ripe_crop_harvests_it(world):
+def test_a_rabbit_knocking_down_a_ripe_crop_harvests_it(world):
     cdef, st = _hungry(world, 1, 2, 2)
     _plant(world, 2, 2, CABBAGE, age=1)
 
@@ -1725,6 +1804,21 @@ def test_a_rabbit_browsing_a_ripe_crop_harvests_it(world):
 
     assert world.chunk.get_block(2, world.SY, 2) == GRASS
     assert [(d["item"], d["count"]) for d in world.world_drops] == [("cabbage", 1)]
+
+
+def test_a_rabbit_eats_the_vegetable_it_knocked_loose(world):
+    # The whole point of raiding rather than grazing a crop: no hunger from the
+    # hit, then the vegetable it leaves behind is worth 2.
+    cdef, st = _hungry(world, 1, 2, 2)
+    _plant(world, 2, 2, CARROT, age=1)
+
+    world._act_feed(1, 0, cdef, 2, 2, avoids=set())      # fells it, gains nothing
+    assert st["hunger"] == 0
+    assert [(d["item"], d["count"]) for d in world.world_drops] == [("carrot", 1)]
+
+    world._act_feed(1, 0, cdef, 2, 2, avoids=set())      # eats what fell
+    assert st["hunger"] == 2
+    assert world.world_drops == []
 
 
 def test_rabbit_crosses_the_map_for_a_crop_before_eating_nearby_grass(world):

@@ -108,6 +108,7 @@ What's covered:
 - Item drops: spawn, stage-specific loot, expiry, and pickup (including diet/sleep gating, and leaving a stack alone when the creature is full or only ate part of it)
 - Flower attack/eat-in-place feeding
 - Plant diets (`_resolve_plant_diet_tiers`, `_forage_tiers`, `_work_plant_at`): grazing ground cover, browsing bushes, raiding flowers and crops, and seeking the nearest plant within `feed_radius`
+- Per-item food value (`_item_hunger_gain`, `_feed`): a vegetable restoring more than plain fare, undeclared items falling back to `hunger_per_food`, and a big meal stopping at full instead of banking the surplus
 - `feed_radius` resolution (`_feed_radius`) and its effect on both the drop and plant search paths
 - Creature pathfinding primitives (`_step_toward`, `_find_nearest_*`, `_move_creature_random`)
 - Creature needs/sleep state machine (`_compute_creature_needs`, `_ranked_needs`, `_act_feed`, `_creature_move`), including a task declining its turn and handing over to the next need
@@ -239,7 +240,7 @@ Hot-reloaded by the **server** every tick (no restart needed for `cycle_length`,
 
 Defines items, vegetation, structures, and creatures. Loaded independently by **both** `server.py` (authoritative rules) and `main.py` (rendering/texture lookups) — unchanged from before.
 
-**Items** — `name`, `tags` (e.g. `raw`, `food` for seed/berry/meat/carrot/cabbage)
+**Items** — `name`, `tags` (e.g. `raw`, `food` for seed/berry/meat/carrot/cabbage, plus `vegetable` on the two crops), and an optional `hunger_gain` for food worth more than the eater's flat `hunger_per_food` (carrot 2, cabbage 3)
 
 **Vegetation** — `tags`, `block_id`, `initial_age`, `age_decay_every_n_cycles`, `stages[]` (texture, optional `render`/`height`/`width`, per-stage loot), `spawn` rules. Stage `render` defaults to `"cross"` (vertical billboard); `"surface"` lays a flat texture on the tile top (used by grass). `block_id` must also be listed in `chunk.py` (`BLOCK_NAMES` and the default-age table used when backfilling older save files).
 
@@ -320,16 +321,16 @@ It decays like any other `flora`-tagged vegetation (moisture-driven).
 
 Carrot and cabbage are `crops`-tagged flora: a single stage, no proximity
 rules, and one item — a carrot or a cabbage — dropped when the plant dies.
-Both are `raw`/`food` items, which puts them straight on the rat's menu (its
-diet is the `food` tag), so rats eat them off the ground and haul them into
-their burrows.
+Both are `raw`/`food`/`vegetable` items worth more than plain fare — a carrot
+restores 2 hunger, a cabbage 3 — and both animals eat them off the ground and
+haul them into their burrows. The `vegetable` tag is what a herbivore's diet
+names, so a rabbit picks up vegetables without ever developing a taste for the
+rat's meat.
 
-Both creatures go for the standing plant too, by different routes. Rabbits
-have `crops` first in their diet, so a crop in range outranks everything else
-they eat. Rats reach crops through the `crops` **tag** rather than their diet,
-the same way they already attack flowers — a rat's diet has to stay
-items-only, because `_act_feed` switches a creature to the herbivore path the
-moment any diet entry resolves to a plant.
+Neither animal eats the plant where it stands: `crops` sits in both their
+`forage` lists, so they knock a crop down for nothing and come back for the
+vegetable it leaves. That makes a crop the most valuable thing either can
+find, and both walk past grass to reach one.
 
 Lifetime is the product of two numbers rather than a duration. Every cycle a
 plant whose `current_cycle % age_decay_every_n_cycles == 0` rolls against
@@ -393,21 +394,33 @@ creature eats. It all comes out of `entities.json`:
 
 | | rat | rabbit |
 |---|---|---|
-| `diet` | `["food"]` | `["crops", "grass", "bush"]` |
-| `forage` | `["flower", "crops"]` | — |
+| `diet` | `["food"]` | `["vegetable", "grass", "bush"]` |
+| `forage` | `["flower", "crops"]` | `["crops"]` |
 | `feed_radius` | 5 | 6 |
-| eats off the ground | seed, berry, meat, carrot, cabbage (the `food` tag) | nothing — its diet names no items |
-| works standing plants | flower, then crops — raids them | crops, then grass, then bush — eats them |
+| eats off the ground | seed, berry, meat, carrot, cabbage (the `food` tag) | carrot, cabbage (the `vegetable` tag) — no meat |
+| fells for the loot | flower, then crops | crops |
+| eats where it stands | — | grass, then bush |
 
 **Eating vs raiding.** A plant in the `diet` is food itself: ground cover
 (tagged `ground_cover`) is cropped away whole and the tile goes back to bare
 soil, anything else is bitten back by `attack`, and either way the mouthful is
 +1 hunger (`hunger_per_food`). A plant in `forage` is not food — the creature
-just knocks it down, and eats whatever loot spills on a later tick via step 1.
-So the same carrot feeds a rabbit directly, while a rat has to level it first:
-two hits at `attack` 1, then 1–2 vegetables on the ground. Bitten-back plants
-still drop their loot when the bite kills them, so a rabbit that finishes a
-bush leaves its berries behind.
+just knocks it down and gains nothing from the hit, then eats whatever loot
+spills on a later tick via step 1. Both animals treat a crop that way: two
+hits at `attack` 1 fell it, and the vegetable left behind is the actual meal.
+Bitten-back plants still drop their loot when the bite kills them, so a rabbit
+that finishes a bush leaves its berries behind (nothing eats those but rats).
+
+**What a mouthful is worth.** Plain fare is one hunger per item, but an item
+may declare its own `hunger_gain`, and a vegetable is a proper meal:
+
+| | seed / berry / meat | carrot | cabbage |
+|---|---|---|---|
+| hunger restored | 1 | 2 | 3 |
+
+Eating stops at full rather than banking the surplus, so one cabbage takes a
+rat (`initial_hunger` 3) from empty to full on its own, while a rabbit
+(`initial_hunger` 5) still has room for a carrot afterwards.
 
 **Tiers.** Each diet entry forms one preference tier, and a tag entry like
 `crops` puts several plants in the same one — within a tier the *nearest* plant

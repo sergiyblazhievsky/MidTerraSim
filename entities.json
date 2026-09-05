@@ -3,8 +3,8 @@
     { "name": "seed",  "tags": ["raw", "food"], "texture": "textures/seed_16.png" },
     { "name": "berry", "tags": ["raw", "food"], "texture": "textures/berry_16.png" },
     { "name": "meat",    "tags": ["raw", "food"], "texture": "textures/meat_16.png" },
-    { "name": "carrot",  "tags": ["raw", "food"], "texture": "textures/carrot_16.png" },
-    { "name": "cabbage", "tags": ["raw", "food"], "texture": "textures/cabbage_16.png" },
+    { "name": "carrot",  "tags": ["raw", "food", "vegetable"], "hunger_gain": 2, "texture": "textures/carrot_16.png" },
+    { "name": "cabbage", "tags": ["raw", "food", "vegetable"], "hunger_gain": 3, "texture": "textures/cabbage_16.png" },
     { "name": "log",   "tags": ["material"],    "texture": "textures/log_16.png" },
     { "name": "stick", "tags": ["material"],    "texture": "textures/stick_16.png" }
   ],
@@ -227,7 +227,8 @@
       "home_gain": 0.5,
       "stock_need": 0.9,
       "needs": ["feed", "sleep", "home", "stock"],
-      "diet": ["crops", "grass", "bush"],
+      "diet": ["vegetable", "grass", "bush"],
+      "forage": ["crops"],
       "feed_radius": 6,
       "hunger_per_food": 1,
       "contains": [

@@ -5,7 +5,8 @@ Handoff document for continuing work in a new chat. Last updated 2026-09-05
 fall-through fix — see [Gotchas](#gotchas) before touching player height —
 world-file persistence of fauna + the simulation clock, a data-driven
 `feed_radius`, burrows/the `home` need, the `stock` need that fills a
-burrow's larder, carrot/cabbage crops, and one feed AI for every creature).
+burrow's larder, carrot/cabbage crops raided for vegetables worth 2–3 hunger,
+and one feed AI for every creature).
 
 ---
 
@@ -105,14 +106,14 @@ next free block id is 8. `tests/test_entities_file.py` fails if that table and
 (missing texture file, loot naming an item that doesn't exist).
 
 **Creatures** — rat + rabbit with `needs: ["feed", "sleep", "home", "stock"]`.
-Rat `diet: ["food"]` (item drops, plus flower and crop attacks). Rabbit
-`diet: ["crops", "grass", "bush"]` (browse crops first, else eat grass cover,
-else browse bushes). Both declare
+Rat `diet: ["food"]` + `forage: ["flower", "crops"]` (every food item; fells
+flowers and crops for their loot). Rabbit `diet: ["vegetable", "grass", "bush"]`
++ `forage: ["crops"]` (fells crops, grazes grass cover, browses bushes, and
+picks vegetables up off the ground — but not meat). Both declare
 `feed_radius` (rat 5, rabbit 6), which caps every food search including the
 hunt for something to hoard; `home_gain: 0.5`, the per-day want for shelter
-while homeless; and `stock_need: 0.9`, the fixed rank of hoarding. Only the
-rat can actually stock: the rabbit's diet resolves to vegetation, and there's
-no carryable item in it.
+while homeless; and `stock_need: 0.9`, the fixed rank of hoarding. Both stock
+now that the rabbit's diet names carryable items.
 
 **Structures** — burrow, the first one. Not a block: it lives on a tile
 next to whatever vegetation is there, rendered as a `"surface"` quad above
@@ -173,16 +174,24 @@ want that has only built up for one day.
 two species diverge — out of `entities.json` alone, with no plant list left in
 `server.py`:
 
+* `forage` plants are felled (`eats=False`) via `_attack_plant_at`: no hunger
+  changes hands, the plant just falls and spills loot the creature eats later
+  via step 1. Both animals fell `crops`; the rat also fells the `flower`.
 * `diet` plants are eaten (`eats=True`): `ground_cover` is cropped away whole
   (`_eat_ground_cover_at`), anything else is bitten back (`_browse_plant_at`),
-  both +`hunger_per_food`. The rabbit's `["crops", "grass", "bush"]`.
-* `forage` plants are only felled (`eats=False`) via `_attack_plant_at`: no
-  hunger changes hands, the plant just falls and spills loot the creature eats
-  later via step 1. The rat's `["flower", "crops"]`.
+  both +`hunger_per_food`. The rabbit's `grass` and `bush`.
 
-Declaring both puts the eaten tiers first. A plant in both lists is resolved
-twice and the eaten tier always wins, so
-`test_no_plant_is_both_eaten_and_raided` keeps the lists disjoint.
+Felled tiers come **first** when a creature declares both, since a vegetable
+beats a mouthful of grass — that ordering is what keeps a rabbit heading for a
+crop instead of grazing. A plant in both lists is resolved twice and the felled
+tier wins, so `test_no_plant_is_both_eaten_and_raided` keeps them disjoint.
+
+**What a mouthful is worth (`_item_hunger_gain`, `_feed`):** an item may
+declare its own `hunger_gain` (carrot 2, cabbage 3); everything else falls back
+to the eater's flat `hunger_per_food`. Both drop-eating paths
+(`_eat_food_at_block` and the passing-by pickup in `_update_drops`) go through
+it, and `_feed()` clamps at `initial_hunger`, so a big meal is capped rather
+than banked. Grazing and browsing stay on the flat rate.
 
 A tag entry (`crops`) puts several plants in one tier; within a tier the
 *nearest* wins rather than the first declared. Tier order beats distance and a
@@ -257,7 +266,7 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 | Entity loading | `load_entities()`, `_veg_with_tag()`, `_items_with_tag()`, `_resolve_diet()` |
 | World drops | `_spawn_drop()`, `_drop_from()`, `_update_drops()` |
 | Simulation | `_sim_step()`, `_count_kind_near()`, `tick()` |
-| Creature AI | `_compute_creature_needs()`, `_ranked_needs()`, `_act_on_need()`, `_act_feed()`, `_work_plant_at()`, `_forage_tiers()`, `_plant_tiers()`, `_feed_radius()`, `_act_home()`, `_creature_move()`, `_eat_food_at_block()` |
+| Creature AI | `_compute_creature_needs()`, `_ranked_needs()`, `_act_on_need()`, `_act_feed()`, `_work_plant_at()`, `_forage_tiers()`, `_plant_tiers()`, `_feed_radius()`, `_act_home()`, `_creature_move()`, `_eat_food_at_block()`, `_item_hunger_gain()`, `_feed()` |
 | Plant damage | `_attack_plant_at()` (generic, no hunger), `_attack_flower_at()` and `_browse_plant_at()` (thin wrappers, the latter adding hunger), `_veg_at()`, `_crop_at()`, `_find_nearest_veg_among()`, `_find_nearest_forage()` |
 | Structures | `_resolve_home_structure()`, `_can_dwell()`, `_structure_at()`, `_structure_by_id()`, `_build_structure()`, `_remove_structure()`, `_break_structures()`, `_settle_home()` |
 | Stocking | `_stock_need()`, `_act_stock()`, `_pick_up_drop_at()`, `_act_deliver()`, `_stash_carried()`, `_drop_carried()` |
@@ -369,6 +378,7 @@ frame times spike from actual mesh building.
 34. `_resolve_plant_diet` became `_resolve_plant_diet_tiers`: a diet entry is now a preference *tier* holding every plant it names, so the tag `crops` groups carrot and cabbage and the nearest of the two wins instead of declaration order
 35. Collapsed the two feed AIs into one. `_act_feed_plants` and the rat's hand-rolled chain are gone; every creature now runs the same chain (drops, then a tier loop of underfoot-else-nearest) over the `(tier, eats)` pairs `_forage_tiers()` builds. That retired the all-or-nothing diet switch: a plant in a rat's diet is now merely a plant it would eat. Only the raiding path shifted behavior: the drop search and the flower search now both outrank a plant underfoot, so a rat on a crop walks to a flower in range instead of hitting the crop. All 339 tests passed unchanged
 36. Moved the last of the feeding policy into `entities.json`. The rat declares `"forage": ["flower", "crops"]` — what it fells for loot without eating — replacing the `self.raid_tiers` list that `__init__` used to build from `flower_vdef` + the `crops` tag. `_eat_ground_cover_at` dispatch also lost its `name == 'grass'` fallback and now keys purely off the `ground_cover` tag. Five new `entities.json` guards (unresolvable entries, plants in both lists, raided plants actually dropping food)
+37. Vegetables became a real meal, and crops a raid for both animals. Items may declare `hunger_gain` (carrot 2, cabbage 3); everything else keeps the eater's flat `hunger_per_food`, and `_feed()` clamps at full so a cabbage can't push a rat past 3. The rabbit stopped grazing crops — `crops` moved from its `diet` to its `forage`, so it fells the plant for nothing and eats the vegetable that drops, same as the rat. The new `vegetable` tag on the two crop items is what the rabbit's diet names (meat stays off its menu), which also means rabbits now stock their burrows. Felled tiers moved ahead of grazed ones in `_forage_tiers` so crops keep outranking grass
 
 ## Session Work Log (2026-09-02)
 
@@ -433,7 +443,8 @@ Both are preference order, and entries matching nothing are dropped in silence
 {
   "name": "rabbit",
   "needs": ["feed", "sleep", "home", "stock"],
-  "diet": ["crops", "grass", "bush"],
+  "diet": ["vegetable", "grass", "bush"],
+  "forage": ["crops"],
   "feed_radius": 6,
   "initial_hunger": 5,
   "initial_age": 3,

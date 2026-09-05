@@ -252,6 +252,18 @@ class World:
                 edible.update(self._items_with_tag(entry))
         return edible
 
+    def _item_hunger_gain(self, item, cdef):
+        """What one of these is worth at the table. Items may declare their own
+        `hunger_gain` -- a cabbage is a bigger meal than a seed -- and plain
+        fare falls back to the creature's flat `hunger_per_food`."""
+        gain = self.item_defs.get(item, {}).get('hunger_gain')
+        return cdef.get('hunger_per_food', 1) if gain is None else gain
+
+    @staticmethod
+    def _feed(st, cdef, gain):
+        """Top up hunger, without a big meal pushing it past full."""
+        st['hunger'] = min(cdef.get('initial_hunger', 3), st['hunger'] + gain)
+
     def _resolve_plant_diet_tiers(self, cdef):
         """The plants this creature eats standing, best tier first."""
         return self._plant_tiers(cdef.get('diet', []))
@@ -281,13 +293,14 @@ class World:
         """Every standing plant this creature works for food, best tier first,
         each paired with whether it eats the plant itself.
 
-        `diet` plants are food outright: grass is cropped away, a bush or crop
-        is bitten back, and either way the mouthful is the meal. `forage`
-        plants it merely knocks down, eating whatever loot spills on a later
-        tick -- which is how a rat gets a seed out of a flower. Declaring both
-        means eating comes first."""
-        return ([(tier, True) for tier in self._resolve_plant_diet_tiers(cdef)]
-                + [(tier, False) for tier in self._plant_tiers(cdef.get('forage', []))])
+        `forage` plants it fells without eating, for the loot they spill -- a
+        rat gets a seed out of a flower that way, and both animals get a
+        vegetable out of a crop. `diet` plants are food where they stand:
+        grass cropped away, a bush bitten back, the mouthful itself the meal.
+        Felling comes first when a creature does both, since what a felled
+        plant leaves behind beats a mouthful of grass."""
+        return ([(tier, False) for tier in self._plant_tiers(cdef.get('forage', []))]
+                + [(tier, True) for tier in self._resolve_plant_diet_tiers(cdef)])
 
     def _resolve_avoids(self, cdef):
         tag = cdef.get('avoids_block_tag')
@@ -638,14 +651,14 @@ class World:
                 positions = self.all_creature_positions[ci]
                 stats = self.all_creature_stats[ci]
                 max_hunger = cdef.get('initial_hunger', 3)
-                hunger_gain = cdef.get('hunger_per_food', 1)
+                hunger_gain = self._item_hunger_gain(drop['item'], cdef)
                 for i, (cx, cz) in enumerate(positions):
                     if stats[i].get('asleep', False):
                         continue
                     if self._manhattan(cx, cz, drop['x'], drop['z']) <= 1:
                         gained = 0
                         while gained < drop['count'] and stats[i]['hunger'] < max_hunger:
-                            stats[i]['hunger'] += hunger_gain
+                            self._feed(stats[i], cdef, hunger_gain)
                             gained += 1
                         # A creature that ate nothing (already full) leaves the
                         # drop alone, and one that ate part of a stack leaves
@@ -719,10 +732,9 @@ class World:
         max_hunger = cdef.get('initial_hunger', 3)
         if st['hunger'] >= max_hunger:
             return False
-        hunger_gain = cdef.get('hunger_per_food', 1)
         self.chunk.set_block(x, self.SY, z, GRASS)
         self.chunk.vegetation_ages.pop((x, z), None)
-        st['hunger'] += hunger_gain
+        self._feed(st, cdef, cdef.get('hunger_per_food', 1))
         self.vegetation_revision += 1
         print(f'[feed] {cdef["name"]}#{i} ate {vdef["name"]} at ({x},{z}) '
               f'hunger={st["hunger"]}')
@@ -735,7 +747,7 @@ class World:
         if not self._attack_plant_at(x, z, vdef, attack):
             return False
         if st['hunger'] < cdef.get('initial_hunger', 3):
-            st['hunger'] += cdef.get('hunger_per_food', 1)
+            self._feed(st, cdef, cdef.get('hunger_per_food', 1))
         print(f'[feed] {cdef["name"]}#{i} browsed {vdef["name"]} at ({x},{z}) '
               f'age={self.chunk.vegetation_ages.get((x, z), 0)} '
               f'hunger={st["hunger"]}')
@@ -780,7 +792,6 @@ class World:
 
         st = self.all_creature_stats[ci][i]
         max_hunger = cdef.get('initial_hunger', 3)
-        hunger_gain = cdef.get('hunger_per_food', 1)
         if st['hunger'] >= max_hunger:
             return False
 
@@ -790,8 +801,9 @@ class World:
         for idx, drop in enumerate(self.world_drops):
             if drop['item'] not in edible or drop['x'] != x or drop['z'] != z:
                 continue
+            hunger_gain = self._item_hunger_gain(drop['item'], cdef)
             while drop['count'] > 0 and st['hunger'] < max_hunger:
-                st['hunger'] += hunger_gain
+                self._feed(st, cdef, hunger_gain)
                 drop['count'] -= 1
                 ate = True
                 eaten_items.append(drop['item'])

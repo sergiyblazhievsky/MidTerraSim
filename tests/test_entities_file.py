@@ -145,7 +145,39 @@ def test_the_crop_is_declared_as_vegetation_and_as_a_food_item(name):
     idef = next(i for i in ENTITIES["items"] if i["name"] == name)
 
     assert vdef["tags"] == ["flora", "small", "crops"]
-    assert idef["tags"] == ["raw", "food"]
+    assert idef["tags"] == ["raw", "food", "vegetable"]
+
+
+@pytest.mark.parametrize("name,gain", [("carrot", 2), ("cabbage", 3)])
+def test_the_vegetable_is_a_bigger_meal_than_plain_fare(name, gain):
+    # Undeclared items fall back to the eater's flat hunger_per_food (1), so
+    # only the vegetables need a value of their own.
+    idef = next(i for i in ENTITIES["items"] if i["name"] == name)
+    plain = [i["name"] for i in ENTITIES["items"]
+             if "food" in i["tags"] and "hunger_gain" not in i]
+
+    assert idef["hunger_gain"] == gain
+    assert sorted(plain) == ["berry", "meat", "seed"]
+
+
+def test_both_animals_eat_the_vegetables_but_only_the_rat_eats_meat():
+    # "vegetable" tags what a herbivore will pick up off the ground; the rat's
+    # broader "food" covers the same vegetables plus seeds, berries and meat.
+    by_name = {c["name"]: c for c in ENTITIES["creatures"]}
+    vegetables = {i["name"] for i in ENTITIES["items"] if "vegetable" in i["tags"]}
+
+    assert vegetables == {"carrot", "cabbage"}
+    assert "vegetable" in by_name["rabbit"]["diet"]
+    assert "food" in by_name["rat"]["diet"]
+    assert "meat" not in by_name["rabbit"]["diet"]
+
+
+def test_both_animals_raid_the_crops_rather_than_grazing_them():
+    # A crop is worth felling, not nibbling: the vegetable it leaves behind is
+    # the meal, which is why "crops" sits in forage for both animals.
+    for cdef in ENTITIES["creatures"]:
+        assert "crops" in cdef["forage"], f"{cdef['name']} does not raid crops"
+        assert "crops" not in cdef["diet"], f"{cdef['name']} grazes crops"
 
 
 @pytest.mark.parametrize("name", ["carrot", "cabbage"])

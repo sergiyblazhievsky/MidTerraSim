@@ -110,13 +110,15 @@ Currently flower/bush/tree are each a single generic type. Extend
 
 - [x] **Carrot and cabbage** -- `crops`-tagged vegetation (block ids 6 and 7)
   that spawns wild with no proximity rules, lives about one season
-  (`initial_age: 2`, decay every 4th cycle) and drops a matching `raw`/`food`
-  item. Rats eat and hoard them, since their diet is the `food` tag.
-- [x] **Both creatures work the standing plant** -- rabbits take `crops` as
-  their first diet tier (a crop in range beats grass further off, nearest crop
-  wins), and rats attack a crop they're standing on or walk to one when no
-  flower is in range. Both now run the *same* `_act_feed` chain; only their
-  `diet`/`forage` lists differ (see README's "Creature feed AI").
+  (`initial_age: 2`, decay every 4th cycle) and drops a matching
+  `raw`/`food`/`vegetable` item. Both animals eat and hoard the vegetables.
+- [x] **Both creatures work the standing plant** -- `crops` sits in both
+  animals' `forage`, so each fells a crop for nothing and comes back for the
+  vegetable, which outranks anything else in reach. Both run the *same*
+  `_act_feed` chain; only their `diet`/`forage` lists differ (see README's
+  "Creature feed AI").
+- [x] **A vegetable is a proper meal** -- items can declare `hunger_gain`
+  (carrot 2, cabbage 3) instead of the eater's flat `hunger_per_food`.
 - [ ] **Wheat** -- the third crop from the original idea, still unbuilt.
 - [ ] **Grow stages for crops** -- both crops are a single stage today, so a
   seedling looks exactly like a ripe plant. Age already counts 2 (young) then
