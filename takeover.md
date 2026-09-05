@@ -105,8 +105,9 @@ next free block id is 8. `tests/test_entities_file.py` fails if that table and
 (missing texture file, loot naming an item that doesn't exist).
 
 **Creatures** — rat + rabbit with `needs: ["feed", "sleep", "home", "stock"]`.
-Rat `diet: ["food"]` (item drops + flower attacks). Rabbit
-`diet: ["grass", "bush"]` (eat grass cover, else browse bushes). Both declare
+Rat `diet: ["food"]` (item drops, plus flower and crop attacks). Rabbit
+`diet: ["crops", "grass", "bush"]` (browse crops first, else eat grass cover,
+else browse bushes). Both declare
 `feed_radius` (rat 5, rabbit 6), which caps every food search including the
 hunt for something to hoard; `home_gain: 0.5`, the per-day want for shelter
 while homeless; and `stock_need: 0.9`, the fixed rank of hoarding. Only the
@@ -160,14 +161,27 @@ Needs compete purely by value, which sets the de-facto priority: `feed` grows
 digs; `stock`'s fixed 0.9 sits below any real hunger (≥ 1) and above a home
 want that has only built up for one day.
 
-**Feed priority:**
+**Feed priority (rat, the item path):**
 1. Eat food on same tile (`_resolve_diet` → items with matching tags/names)
 2. Attack flower on same tile
-3. Step toward nearest food drop within `feed_radius`
-4. Step toward nearest dead flower, then live flower — same radius
-5. Random move
+3. Attack crop on same tile (`_crop_at`)
+4. Step toward nearest food drop within `feed_radius`
+5. Step toward nearest dead flower, then live flower — same radius
+6. Step toward nearest crop — flowers win, crops are the fallback
+7. Random move
 
-Diet `"food"` resolves to seed, berry, meat via item tags.
+Diet `"food"` resolves to seed, berry, meat, carrot, cabbage via item tags.
+Attacking (`_attack_plant_at`) never feeds the attacker; it fells the plant so
+its loot drops, and the rat eats that on a later tick via step 1. Crops are
+found through the `crops` **tag** (`self.crop_vdefs`), *not* the rat's diet —
+putting a plant in a rat's diet would route it to `_act_feed_plants` and kill
+the whole item path.
+
+**Feed priority (rabbit, the plant path):** diet entries are preference tiers,
+walked in order — `["crops", "grass", "bush"]`. For each tier: browse/graze a
+plant of that tier underfoot, else step toward the nearest one in range, else
+fall through to the next tier. A tag entry (`crops`) puts several plants in
+one tier, and within a tier the *nearest* wins rather than the first declared.
 
 **Home (`_act_home`):** claims the tile the creature is standing on — adopt
 the structure already there if `dwellers` allows it, else build one (never
@@ -233,7 +247,8 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 | Entity loading | `load_entities()`, `_veg_with_tag()`, `_items_with_tag()`, `_resolve_diet()` |
 | World drops | `_spawn_drop()`, `_drop_from()`, `_update_drops()` |
 | Simulation | `_sim_step()`, `_count_kind_near()`, `tick()` |
-| Creature AI | `_compute_creature_needs()`, `_ranked_needs()`, `_act_on_need()`, `_act_feed()`, `_act_feed_plants()`, `_feed_radius()`, `_act_home()`, `_creature_move()`, `_eat_food_at_block()` |
+| Creature AI | `_compute_creature_needs()`, `_ranked_needs()`, `_act_on_need()`, `_act_feed()`, `_act_feed_plants()`, `_resolve_plant_diet_tiers()`, `_feed_radius()`, `_act_home()`, `_creature_move()`, `_eat_food_at_block()` |
+| Plant damage | `_attack_plant_at()` (generic, no hunger), `_attack_flower_at()` and `_browse_plant_at()` (thin wrappers, the latter adding hunger), `_crop_at()`, `_find_nearest_veg_among()` |
 | Structures | `_resolve_home_structure()`, `_can_dwell()`, `_structure_at()`, `_structure_by_id()`, `_build_structure()`, `_remove_structure()`, `_break_structures()`, `_settle_home()` |
 | Stocking | `_stock_need()`, `_act_stock()`, `_pick_up_drop_at()`, `_act_deliver()`, `_stash_carried()`, `_drop_carried()` |
 | Lifecycle | `_on_day_start()`, `_on_season_start()`, `_spawn_creature_at()`, `_remove_creature()` |
@@ -340,6 +355,8 @@ frame times spike from actual mesh building.
 30. Fixed `_update_drops()` destroying a whole stack whenever an adjacent creature was near it, even one too full to eat anything — a hauler is always full, so this ate the feature's food before it could be carried
 31. Added **carrot** and **cabbage**: `crops`-tagged vegetation (block ids 6/7, single stage, 4% spawn, no proximity rules) dropping matching `raw`/`food` items. Tuned to `initial_age: 2` + `age_decay_every_n_cycles: 4`, which a 40k-plant Monte Carlo puts at a 10.1-cycle mean life = one season
 32. Added `tests/test_entities_file.py` — the first tests to validate the *real* `entities.json` (textures exist, loot references resolve, block ids unique and in sync with `chunk.py`, stage order, unambiguous diets)
+33. Both creatures now work the standing crop, not just its drops: rabbits took `crops` as the **first** diet entry, rats attack a crop underfoot and walk to one when no flower is in range. Plant damage was pulled out into `_attack_plant_at()`, shared by the flower attack (no hunger) and browsing (hunger)
+34. `_resolve_plant_diet` became `_resolve_plant_diet_tiers`: a diet entry is now a preference *tier* holding every plant it names, so the tag `crops` groups carrot and cabbage and the nearest of the two wins instead of declaration order
 
 ## Session Work Log (2026-09-02)
 
@@ -371,8 +388,12 @@ frame times spike from actual mesh building.
 
 ## Quick Reference: Creature Configs
 
-`diet` drives *which* feed AI runs: item names/tags → drops + flower attacks
-(`_act_feed`); vegetation names/tags → grazing/browsing (`_act_feed_plants`).
+`diet` drives *which* feed AI runs: item names/tags → drops + flower/crop
+attacks (`_act_feed`); vegetation names/tags → grazing/browsing
+(`_act_feed_plants`). The switch is all-or-nothing — one plant-matching diet
+entry sends the creature down the herbivore path and its item behavior never
+runs, which is why the rat's diet must stay items-only and why
+`test_no_diet_entry_matches_both_a_plant_and_an_item` exists.
 `feed_radius` caps the search distance on both paths via `_feed_radius(cdef)`
 (fallback `DEFAULT_FEED_RADIUS = 5`).
 
@@ -396,7 +417,7 @@ frame times spike from actual mesh building.
 {
   "name": "rabbit",
   "needs": ["feed", "sleep", "home", "stock"],
-  "diet": ["grass", "bush"],
+  "diet": ["crops", "grass", "bush"],
   "feed_radius": 6,
   "initial_hunger": 5,
   "initial_age": 3,

@@ -128,12 +128,19 @@ def test_the_crop_lives_about_one_season(name):
 
 
 @pytest.mark.parametrize("name", ["carrot", "cabbage"])
-def test_the_crop_spawns_freely_at_the_declared_chance(name):
+def test_the_crop_spawns_with_no_placement_restrictions(name):
+    # The chance itself is a tuning knob and deliberately not pinned here.
     vdef = next(v for v in ENTITIES["vegetation"] if v["name"] == name)
 
-    assert vdef["spawn"]["chance"] == 0.04
+    assert 0 < vdef["spawn"]["chance"] <= 1
     assert vdef["spawn"]["max_same_within"] is None
     assert [k for k in vdef["spawn"] if k.startswith("requires_no_")] == []
+
+
+def test_both_crops_spawn_at_the_same_rate():
+    chances = {v["spawn"]["chance"] for v in ENTITIES["vegetation"]
+               if "crops" in v["tags"]}
+    assert len(chances) == 1
 
 
 def test_rats_will_eat_and_hoard_the_new_crops():

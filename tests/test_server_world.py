@@ -9,7 +9,7 @@ import time as time_module
 import pytest
 
 import server as server_module
-from chunk import BUSH, FLOWER, GRASS, GRASS_PATCH, TREE
+from chunk import BUSH, CABBAGE, CARROT, FLOWER, GRASS, GRASS_PATCH, TREE
 
 from tests.conftest import isolate_creature
 
@@ -1111,7 +1111,8 @@ def test_apply_season_updates_chunk_and_texture(world):
 
 def test_resolve_diet_expands_tag_to_matching_items(world):
     cdef = world.creature_defs[0]
-    assert world._resolve_diet(cdef) == {"seed", "berry", "meat"}
+    assert world._resolve_diet(cdef) == {"seed", "berry", "meat",
+                                         "carrot", "cabbage"}
 
 
 def test_resolve_diet_accepts_direct_item_names(world):
@@ -1601,13 +1602,27 @@ def test_act_feed_steps_toward_nearby_food_drop_before_attacking_any_flower(worl
 
 # ── rabbit plant-diet feed AI ────────────────────────────────────────────────
 
-def test_resolve_plant_diet_matches_vegetation_names_in_order(world):
-    plants = world._resolve_plant_diet(world.creature_defs[1])
-    assert [p["name"] for p in plants] == ["grass", "bush"]
+def test_resolve_plant_diet_tiers_keeps_declared_order(world):
+    tiers = world._resolve_plant_diet_tiers(world.creature_defs[1])
+    assert [[p["name"] for p in tier] for tier in tiers] == [
+        ["carrot", "cabbage"], ["grass"], ["bush"]]
 
 
-def test_resolve_plant_diet_empty_for_item_only_diet(world):
-    assert world._resolve_plant_diet(world.creature_defs[0]) == []
+def test_a_tag_diet_entry_becomes_one_tier_of_several_plants(world):
+    # "crops" names two plants, so they share a preference tier rather than
+    # carrot outranking cabbage by declaration order.
+    tiers = world._resolve_plant_diet_tiers({"diet": ["crops"]})
+    assert len(tiers) == 1
+    assert {p["name"] for p in tiers[0]} == {"carrot", "cabbage"}
+
+
+def test_resolve_plant_diet_tiers_drops_entries_matching_no_plant(world):
+    assert world._resolve_plant_diet_tiers({"diet": ["food", "grass"]}) == [
+        [world.veg_defs[GRASS_PATCH]]]
+
+
+def test_resolve_plant_diet_tiers_empty_for_item_only_diet(world):
+    assert world._resolve_plant_diet_tiers(world.creature_defs[0]) == []
 
 
 def test_act_feed_rabbit_eats_grass_on_same_tile(world):
@@ -1671,6 +1686,183 @@ def test_act_feed_rabbit_kills_bush_when_age_hits_zero(world):
     assert world.chunk.get_block(0, world.SY, 0) == GRASS
     assert (0, 0) not in world.chunk.vegetation_ages
     assert any(d["item"] == "berry" for d in world.world_drops)
+
+
+# ── crops: rabbits browse them first, rats raid them last ───────────────────
+
+def _hungry(world, ci, x, z):
+    """One hungry, isolated creature of type ci standing at (x, z)."""
+    isolate_creature(world, ci, 0)
+    world.all_creature_positions[ci][0] = (x, z)
+    st = world.all_creature_stats[ci][0]
+    st["hunger"] = 0
+    st["asleep"] = False
+    st["attack"] = 1
+    return world.creature_defs[ci], st
+
+
+def _plant(world, x, z, bid, age=2):
+    world.chunk.set_block(x, world.SY, z, bid)
+    world.chunk.vegetation_ages[(x, z)] = age
+
+
+def test_rabbit_browses_a_crop_on_its_own_tile(world):
+    cdef, st = _hungry(world, 1, 2, 2)
+    _plant(world, 2, 2, CARROT)
+
+    result = world._act_feed(1, 0, cdef, 2, 2, avoids=set())
+
+    assert result == (2, 2)
+    assert world.chunk.vegetation_ages[(2, 2)] == 1   # aged by attack
+    assert st["hunger"] == 1
+
+
+def test_a_rabbit_browsing_a_ripe_crop_harvests_it(world):
+    cdef, st = _hungry(world, 1, 2, 2)
+    _plant(world, 2, 2, CABBAGE, age=1)
+
+    world._act_feed(1, 0, cdef, 2, 2, avoids=set())
+
+    assert world.chunk.get_block(2, world.SY, 2) == GRASS
+    assert [(d["item"], d["count"]) for d in world.world_drops] == [("cabbage", 1)]
+
+
+def test_rabbit_crosses_the_map_for_a_crop_before_eating_nearby_grass(world):
+    cdef, _ = _hungry(world, 1, 0, 0)
+    world.chunk.set_block(1, world.SY, 0, GRASS_PATCH)   # one step away
+    world.chunk.vegetation_ages[(1, 0)] = 5
+    _plant(world, 4, 0, CARROT)                          # four steps away
+
+    result = world._act_feed(1, 0, cdef, 0, 0, avoids=set())
+
+    assert result == (1, 0)   # a step toward the carrot, not onto the grass
+
+
+def test_rabbit_takes_the_nearest_crop_regardless_of_which_kind(world):
+    # Both are in the same diet tier, so distance decides -- carrot being
+    # declared first must not drag the rabbit past a closer cabbage.
+    cdef, _ = _hungry(world, 1, 0, 0)
+    _plant(world, 4, 0, CARROT)
+    _plant(world, 2, 0, CABBAGE)
+
+    assert world._act_feed(1, 0, cdef, 0, 0, avoids=set()) == (1, 0)
+
+    world.chunk.set_block(2, world.SY, 0, GRASS)   # closer cabbage harvested
+    _plant(world, 0, 3, CABBAGE)                   # now one is nearer the other way
+
+    assert world._act_feed(1, 0, cdef, 0, 0, avoids=set()) == (0, 1)
+
+
+def test_rabbit_falls_back_to_grass_when_no_crop_is_in_range(world):
+    cdef, _ = _hungry(world, 1, 0, 0)
+    world.chunk.set_block(1, world.SY, 0, GRASS_PATCH)
+    world.chunk.vegetation_ages[(1, 0)] = 5
+    _plant(world, 5, 5, CARROT)   # 10 tiles away, feed_radius is 6
+
+    result = world._act_feed(1, 0, cdef, 0, 0, avoids=set())
+
+    assert result == (1, 0)
+    assert world.chunk.get_block(1, world.SY, 0) == GRASS_PATCH  # stepped, not eaten
+
+
+def test_rat_attacks_a_crop_it_is_standing_on(world):
+    cdef, st = _hungry(world, 0, 2, 2)
+    _plant(world, 2, 2, CARROT)
+
+    result = world._act_feed(0, 0, cdef, 2, 2, avoids=set())
+
+    assert result == (2, 2)
+    assert world.chunk.vegetation_ages[(2, 2)] == 1
+    assert st["hunger"] == 0   # attacking feeds nobody; the drop does that
+
+
+def test_a_rat_knocking_down_a_crop_leaves_the_vegetable_to_eat(world):
+    cdef, _ = _hungry(world, 0, 2, 2)
+    _plant(world, 2, 2, CABBAGE, age=1)
+
+    world._act_feed(0, 0, cdef, 2, 2, avoids=set())
+
+    assert world.chunk.get_block(2, world.SY, 2) == GRASS
+    assert [(d["item"], d["count"]) for d in world.world_drops] == [("cabbage", 1)]
+    # ...and the vegetable is on the rat's menu, since its diet is the food tag
+    assert "cabbage" in world._resolve_diet(cdef)
+
+
+def test_rat_heads_for_a_crop_when_no_flower_is_in_range(world):
+    cdef, _ = _hungry(world, 0, 0, 0)
+    _plant(world, 3, 0, CARROT)
+
+    result = world._act_feed(0, 0, cdef, 0, 0, avoids=set())
+
+    assert result == (1, 0)
+
+
+def test_rat_prefers_a_further_flower_over_a_closer_crop(world):
+    cdef, _ = _hungry(world, 0, 0, 0)
+    _plant(world, 1, 0, CARROT)                       # one step away
+    world.chunk.set_block(0, world.SY, 3, FLOWER)     # three steps away
+    world.chunk.vegetation_ages[(0, 3)] = 2
+
+    result = world._act_feed(0, 0, cdef, 0, 0, avoids=set())
+
+    assert result == (0, 1)   # toward the flower
+
+
+def test_rat_prefers_a_food_drop_over_a_crop(world):
+    cdef, _ = _hungry(world, 0, 0, 0)
+    _plant(world, 1, 0, CARROT)
+    world._spawn_drop("seed", 1, 0, 2)
+
+    assert world._act_feed(0, 0, cdef, 0, 0, avoids=set()) == (0, 1)
+
+
+def test_rat_wanders_when_neither_flower_nor_crop_is_in_range(world):
+    cdef, _ = _hungry(world, 0, 2, 2)
+    _plant(world, 5, 5, CARROT)   # 6 tiles away, feed_radius is 5
+
+    result = world._act_feed(0, 0, cdef, 2, 2, avoids=set())
+
+    assert world._manhattan(2, 2, *result) == 1   # a single random step
+    assert world.chunk.get_block(5, world.SY, 5) == CARROT   # left standing
+
+
+def test_crop_vdefs_are_resolved_from_the_tag(world):
+    assert [v["name"] for v in world.crop_vdefs] == ["carrot", "cabbage"]
+
+
+def test_crop_at_reports_the_plant_standing_there(world):
+    _plant(world, 1, 1, CABBAGE)
+
+    assert world._crop_at(1, 1)["name"] == "cabbage"
+    assert world._crop_at(2, 2) is None
+
+
+def test_attacking_a_plant_does_not_feed_the_attacker(world):
+    _plant(world, 1, 1, CARROT)
+    before = world.vegetation_revision
+
+    assert world._attack_plant_at(1, 1, world.crop_vdefs[0], attack_value=1) is True
+    assert world.chunk.vegetation_ages[(1, 1)] == 1
+    assert world.vegetation_revision == before + 1
+
+
+def test_attacking_a_plant_that_is_not_there_is_a_no_op(world):
+    before = world.vegetation_revision
+
+    assert world._attack_plant_at(1, 1, world.crop_vdefs[0], attack_value=1) is False
+    assert world.vegetation_revision == before
+
+
+def test_find_nearest_veg_among_ignores_the_searchers_own_tile(world):
+    _plant(world, 1, 1, CARROT)
+    _plant(world, 3, 1, CABBAGE)
+
+    assert world._find_nearest_veg_among(1, 1, world.crop_vdefs, radius=5) == (3, 1)
+
+
+def test_find_nearest_veg_among_is_empty_without_plants_to_look_for(world):
+    assert world._find_nearest_veg_among(1, 1, [], radius=5) is None
+    assert world._find_nearest_veg_among(1, 1, [None], radius=5) is None
 
 
 def test_remove_rabbit_drops_two_to_three_meat(world):

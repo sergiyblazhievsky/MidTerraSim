@@ -108,12 +108,12 @@ dependencies, works fully offline) that polls `GET /state` client-side once
 per second and renders a collapsible tree:
 
 ```
-▾ Vegetation (2924)
-    ▸ bush (465)
-    ▸ cabbage (860)
-    ▸ carrot (924)
-    ▸ flower (469)
-    ▸ tree (206)
+▾ Vegetation (1494)
+    ▸ bush (506)
+    ▸ cabbage (107)
+    ▸ carrot (127)
+    ▸ flower (561)
+    ▸ tree (193)
 ▾ Structures (1)
   ▾ burrow (1)
       ▾ burrow #1

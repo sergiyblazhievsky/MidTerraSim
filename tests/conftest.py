@@ -29,7 +29,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import server as server_module  # noqa: E402
-from chunk import BUSH, FLOWER, GRASS, GRASS_PATCH, TREE, Chunk  # noqa: E402
+from chunk import (BUSH, CABBAGE, CARROT, FLOWER, GRASS, GRASS_PATCH,  # noqa: E402
+                   TREE, Chunk)
 
 
 # A small, deterministic entities.json used by every test. Kept structurally
@@ -41,6 +42,8 @@ TEST_ENTITIES = {
         {"name": "seed", "tags": ["raw", "food"], "texture": "textures/seed_16.png"},
         {"name": "berry", "tags": ["raw", "food"], "texture": "textures/berry_16.png"},
         {"name": "meat", "tags": ["raw", "food"], "texture": "textures/meat_16.png"},
+        {"name": "carrot", "tags": ["raw", "food"], "texture": "textures/carrot_16.png"},
+        {"name": "cabbage", "tags": ["raw", "food"], "texture": "textures/cabbage_16.png"},
         {"name": "log", "tags": ["material"], "texture": "textures/log_16.png"},
         {"name": "stick", "tags": ["material"], "texture": "textures/stick_16.png"},
     ],
@@ -127,6 +130,35 @@ TEST_ENTITIES = {
                 "max_same_within": None,
             },
         },
+        # Crops never spawn on their own here (chance 0) so tests that count
+        # or place flora stay deterministic; put one down by hand to exercise
+        # the crop paths.
+        {
+            "name": "carrot",
+            "tags": ["flora", "small", "crops"],
+            "block_id": CARROT,
+            "initial_age": 2,
+            "age_decay_every_n_cycles": 4,
+            "contains": [],
+            "stages": [
+                {"max_age": 99, "texture": "textures/carrot_xcross_64.png",
+                 "height": 1.0, "contains": [{"item": "carrot", "count": [1, 1]}]},
+            ],
+            "spawn": {"chance": 0.0, "max_same_within": None},
+        },
+        {
+            "name": "cabbage",
+            "tags": ["flora", "small", "crops"],
+            "block_id": CABBAGE,
+            "initial_age": 2,
+            "age_decay_every_n_cycles": 4,
+            "contains": [],
+            "stages": [
+                {"max_age": 99, "texture": "textures/cabbage_xcross_64.png",
+                 "height": 1.0, "contains": [{"item": "cabbage", "count": [1, 1]}]},
+            ],
+            "spawn": {"chance": 0.0, "max_same_within": None},
+        },
         {
             "name": "grass",
             "tags": ["flora", "ground_cover"],
@@ -202,7 +234,7 @@ TEST_ENTITIES = {
             "needs": ["feed", "sleep", "home", "stock"],
             "home_gain": 0.5,
             "stock_need": 0.9,
-            "diet": ["grass", "bush"],
+            "diet": ["crops", "grass", "bush"],
             "feed_radius": 6,
             "hunger_per_food": 1,
             "contains": [{"item": "meat", "count": [2, 3]}],

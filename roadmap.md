@@ -109,9 +109,13 @@ Currently flower/bush/tree are each a single generic type. Extend
 ## Crops
 
 - [x] **Carrot and cabbage** -- `crops`-tagged vegetation (block ids 6 and 7)
-  that spawns wild at 4% with no proximity rules, lives about one season
+  that spawns wild with no proximity rules, lives about one season
   (`initial_age: 2`, decay every 4th cycle) and drops a matching `raw`/`food`
-  item. Rats already eat and hoard them, since their diet is the `food` tag.
+  item. Rats eat and hoard them, since their diet is the `food` tag.
+- [x] **Both creatures work the standing plant** -- rabbits take `crops` as
+  their first diet tier (a crop in range beats grass underfoot, nearest crop
+  wins), and rats attack a crop they're standing on or walk to one when no
+  flower is in range.
 - [ ] **Wheat** -- the third crop from the original idea, still unbuilt.
 - [ ] **Grow stages for crops** -- both crops are a single stage today, so a
   seedling looks exactly like a ripe plant. Age already counts 2 (young) then
@@ -119,10 +123,9 @@ Currently flower/bush/tree are each a single generic type. Extend
 - [ ] **Planting rather than wild spawn** -- crops currently seed themselves
   anywhere like weeds. The original idea was player- or human-planted plots,
   which is what the humans feature would want.
-- [ ] **Rabbits raiding the crops** -- the `crops` tag exists for this, but
-  the rabbit diet is still `["grass", "bush"]`. Careful: adding a tag that
-  also matches an *item* would flip rats onto the plant-feeding path
-  wholesale (see `test_no_diet_entry_matches_both_a_plant_and_an_item`).
+- [ ] **Crops worth defending** -- now that both species raid them, the
+  interesting version is a keeper: something that plants crops and objects to
+  rabbits eating them. Waits on the humans feature.
 
 ---
 

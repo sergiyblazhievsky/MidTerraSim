@@ -131,7 +131,7 @@
         { "max_age": 99, "texture": "textures/carrot_xcross_64.png", "height": 1.0, "contains": [{ "item": "carrot", "count": [1, 2] }] }
       ],
       "spawn": {
-        "chance": 0.040,
+        "chance": 0.004,
         "max_same_within": null
       }
     },
@@ -146,7 +146,7 @@
         { "max_age": 99, "texture": "textures/cabbage_xcross_64.png", "height": 1.0, "contains": [{ "item": "cabbage", "count": [1, 2] }] }
       ],
       "spawn": {
-        "chance": 0.040,
+        "chance": 0.004,
         "max_same_within": null
       }
     },
@@ -226,7 +226,7 @@
       "home_gain": 0.5,
       "stock_need": 0.9,
       "needs": ["feed", "sleep", "home", "stock"],
-      "diet": ["grass", "bush"],
+      "diet": ["crops", "grass", "bush"],
       "feed_radius": 6,
       "hunger_per_food": 1,
       "contains": [

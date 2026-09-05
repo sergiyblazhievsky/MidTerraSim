@@ -111,6 +111,7 @@ What's covered:
 - `feed_radius` resolution (`_feed_radius`) and its effect on both the carnivore and herbivore search paths
 - Creature pathfinding primitives (`_step_toward`, `_find_nearest_*`, `_move_creature_random`)
 - Creature needs/sleep state machine (`_compute_creature_needs`, `_ranked_needs`, `_act_feed`, `_creature_move`), including a task declining its turn and handing over to the next need
+- Crop feeding both ways: rabbits preferring crops over grass at their feet and picking the nearest within a diet tier, rats attacking a crop underfoot and heading for one only when no flower is in reach
 - Structures: the `home` need accruing while homeless, building/adopting a burrow (`_act_home`), one structure per tile, seasonal weathering and collapse (`_break_structures`), eviction of dwellers, and structure persistence including dangling-`home` cleanup
 - Stocking (`_act_stock`, `_act_deliver`): need ordering against hunger and shelter, taking one item off a stack, hauling it home ignoring all other needs, stashing/stacking it in the larder, and putting it back on the ground when the burrow or the creature is lost
 - Daily/seasonal lifecycle (hunger/age decay, winter aging, reproduction each season change, removal)
@@ -142,12 +143,12 @@ omitted from the Vegetation section (they cover most of the map and drown out
 flowers/bushes/trees); they remain in `/state` for the UI client.
 
 ```
-▾ Vegetation (2924)
-    ▸ bush (465)
-    ▸ cabbage (860)
-    ▸ carrot (924)
-    ▸ flower (469)
-    ▸ tree (206)
+▾ Vegetation (1494)
+    ▸ bush (506)
+    ▸ cabbage (107)
+    ▸ carrot (127)
+    ▸ flower (561)
+    ▸ tree (193)
 ▾ Structures (2)
   ▾ burrow (2)
       ▾ burrow #1
@@ -289,15 +290,17 @@ Only grass is a soft under-layer; every other plant blocks the tile against the 
 | Flower | 9% | Max 1 neighbor flower within radius 1 |
 | Bush | 3% | No tree/bush within radius 1 |
 | Tree | 1% | No tree within radius 2, no bush within radius 1 |
-| Carrot | 4% | None — crops may grow shoulder to shoulder |
-| Cabbage | 4% | None — crops may grow shoulder to shoulder |
+| Carrot | 0.4% | None — crops may grow shoulder to shoulder |
+| Cabbage | 0.4% | None — crops may grow shoulder to shoulder |
 | Grass | 15% | Only during `active_seasons` (spring, summer) — no proximity constraints |
 
-An unconstrained 4% is dense: measured over 30 cycles on a 100×100 map, the
-two crops settle around 900 tiles each (~18% of the map between them), mostly
-colonizing bare soil — the other flora lose about 10–14% of their standing
-count to the competition. Give them a `max_same_within` (as flower has) to
-thin them into patches rather than fields.
+Crop chance is the one worth feeling out, since nothing caps their density.
+Measured over 30 cycles on the 100×100 world, `0.004` settles at roughly 130
+carrots and 110 cabbages (~2% of the map between them, a light scattering)
+and costs the established flora nothing measurable. At `0.04` the same run
+gives ~900 of each — 18% of the map, real fields — and trims flower/bush/tree
+by 10–14%. A `max_same_within` (as flower has) would break them into patches
+instead of an even sprinkle.
 
 All spawns also require a fertility roll (`random 0–100 ≤ chunk.fertility`). A
 vegetation entry's `spawn.active_seasons` (optional, e.g. `["spring", "summer"]`)
@@ -316,8 +319,15 @@ It decays like any other `flora`-tagged vegetation (moisture-driven).
 Carrot and cabbage are `crops`-tagged flora: a single stage, no proximity
 rules, and one item — a carrot or a cabbage — dropped when the plant dies.
 Both are `raw`/`food` items, which puts them straight on the rat's menu (its
-diet is the `food` tag), so rats will eat them off the ground and haul them
-into their burrows.
+diet is the `food` tag), so rats eat them off the ground and haul them into
+their burrows.
+
+Both creatures go for the standing plant too, by different routes. Rabbits
+have `crops` first in their diet, so a crop in range outranks everything else
+they eat. Rats reach crops through the `crops` **tag** rather than their diet,
+the same way they already attack flowers — a rat's diet has to stay
+items-only, because `_act_feed` switches a creature to the herbivore path the
+moment any diet entry resolves to a plant.
 
 Lifetime is the product of two numbers rather than a duration. Every cycle a
 plant whose `current_cycle % age_decay_every_n_cycles == 0` rolls against
@@ -373,19 +383,34 @@ When hungry (`feed` need = `initial_hunger - hunger`):
 
 1. Eat food drops on same tile (seed, berry, meat, carrot, cabbage — resolved via `food` tag)
 2. Attack flower on same tile (reduce age by `attack`)
-3. Move toward nearest food drop within `feed_radius` (5 for rats)
-4. Move toward nearest dead flower, then live flower — same `feed_radius`
-5. Random move if nothing found
+3. Attack crop on same tile (same deal — it's standing on food)
+4. Move toward nearest food drop within `feed_radius` (5 for rats)
+5. Move toward nearest dead flower, then live flower — same `feed_radius`
+6. Move toward nearest crop — flowers first, fields as the fallback
+7. Random move if nothing found
+
+Attacking never feeds the rat directly; it knocks the plant down so it spills
+loot, and the rat eats that on a later tick (step 1). A crop at `initial_age`
+2 takes two hits from a rat with `attack` 1, then leaves 1–2 vegetables.
 
 ### Creature feed AI (rabbits)
 
-Herbivore diet (`diet: ["grass", "bush"]`, search radius `feed_radius`, 6 for rabbits):
+Herbivore diet (`diet: ["crops", "grass", "bush"]`, search radius `feed_radius`, 6 for rabbits):
 
-1. If standing on grass cover — eat it (tile returns to bare soil), +1 hunger
-2. Else move toward nearest grass within `feed_radius`
-3. Else if standing on a bush — browse it (bush age −`attack`, +1 hunger); bush dies and drops loot at age 0
-4. Else move toward nearest bush within `feed_radius`
-5. Random move if nothing found
+1. If standing on a crop — browse it (crop age −`attack`, +1 hunger); it dies and drops its vegetable at age 0
+2. Else move toward the nearest crop within `feed_radius`
+3. Else if standing on grass cover — eat it (tile returns to bare soil), +1 hunger
+4. Else move toward nearest grass within `feed_radius`
+5. Else if standing on a bush — browse it (bush age −`attack`, +1 hunger); bush dies and drops loot at age 0
+6. Else move toward nearest bush within `feed_radius`
+7. Random move if nothing found
+
+Diet order is strict preference: a rabbit walks past grass at its feet to
+reach a crop four tiles away. Each diet entry forms one **tier**, and a tag
+entry like `crops` puts several plants in the same tier — within a tier the
+*nearest* plant wins, so a closer cabbage beats a further carrot even though
+carrot is declared first. The next tier is only considered when the current
+one has nothing in range at all.
 
 ### Creature sleep AI (rats / rabbits)
 
