@@ -113,8 +113,6 @@ class World:
         self.item_defs = {i['name']: i for i in self.entities_cfg.get('items', [])}
         self.flower_vdef = next((v for v in self.entities_cfg.get('vegetation', [])
                                   if v.get('name') == 'flower'), None)
-        # Rats raid crops the way they work flowers — a food source they
-        # attack rather than a diet entry (their diet is items).
         self.crop_vdefs = self._veg_with_tag('crops')
         self.creature_defs = list(self.entities_cfg.get('creatures', []))
         self.structure_defs = list(self.entities_cfg.get('structures', []))
@@ -255,13 +253,17 @@ class World:
         return edible
 
     def _resolve_plant_diet_tiers(self, cdef):
-        """Diet entries that match vegetation by name or tag, in declared
-        order, each as the group of plants that entry names -- a tag like
-        "crops" covers several. Preference runs *between* tiers; inside one,
-        distance decides, so a nearer cabbage beats a further carrot."""
+        """The plants this creature eats standing, best tier first."""
+        return self._plant_tiers(cdef.get('diet', []))
+
+    def _plant_tiers(self, entries):
+        """Entries that match vegetation by name or tag, in declared order,
+        each as the group of plants that entry names -- a tag like "crops"
+        covers several. Preference runs *between* tiers; inside one, distance
+        decides, so a nearer cabbage beats a further carrot."""
         tiers = []
         seen = set()
-        for entry in cdef.get('diet', []):
+        for entry in entries:
             tier = []
             for vdef in self.entities_cfg.get('vegetation', []):
                 if vdef.get('name') != entry and entry not in vdef.get('tags', []):
@@ -274,6 +276,18 @@ class World:
             if tier:
                 tiers.append(tier)
         return tiers
+
+    def _forage_tiers(self, cdef):
+        """Every standing plant this creature works for food, best tier first,
+        each paired with whether it eats the plant itself.
+
+        `diet` plants are food outright: grass is cropped away, a bush or crop
+        is bitten back, and either way the mouthful is the meal. `forage`
+        plants it merely knocks down, eating whatever loot spills on a later
+        tick -- which is how a rat gets a seed out of a flower. Declaring both
+        means eating comes first."""
+        return ([(tier, True) for tier in self._resolve_plant_diet_tiers(cdef)]
+                + [(tier, False) for tier in self._plant_tiers(cdef.get('forage', []))])
 
     def _resolve_avoids(self, cdef):
         tag = cdef.get('avoids_block_tag')
@@ -684,7 +698,12 @@ class World:
 
     def _crop_at(self, x, z):
         """The crop standing on this tile, if any."""
-        for vdef in self.crop_vdefs:
+        return self._veg_at(x, z, self.crop_vdefs)
+
+    def _veg_at(self, x, z, vdefs):
+        """Whichever of these plants stands on this tile, if any. Only one
+        can, so the order they are offered in never decides anything."""
+        for vdef in vdefs:
             if self._is_veg_at(x, z, vdef):
                 return vdef
         return None
@@ -742,8 +761,17 @@ class World:
                     best = (fx, fz)
         return best
 
-    def _find_nearest_veg(self, x, z, vdef, radius=DEFAULT_FEED_RADIUS):
-        return self._find_nearest_veg_among(x, z, [vdef], radius=radius)
+    def _find_nearest_forage(self, x, z, tier, radius=DEFAULT_FEED_RADIUS):
+        """Nearest plant of this tier worth walking to. Distance decides,
+        except among flowers: a dried one is a seed head about to fall, so it
+        outranks a live one however much further away it stands."""
+        if tier and all(self._has_tag(v, 'flower') for v in tier):
+            for dead in (True, False):
+                target = self._find_nearest_flower(x, z, dead=dead, radius=radius)
+                if target:
+                    return target
+            return None
+        return self._find_nearest_veg_among(x, z, tier, radius=radius)
 
     def _eat_food_at_block(self, x, z, ci, i, cdef):
         edible = self._resolve_diet(cdef)
@@ -852,71 +880,54 @@ class World:
             return (nx, nz)
         return (x, z)
 
-    def _act_feed_plants(self, ci, i, cdef, x, z, avoids, plant_tiers):
-        """Herbivore feed: diet order is preference (e.g. crops, then grass,
-        then bush). A tier is only skipped when it has nothing in range."""
-        radius = self._feed_radius(cdef)
-        for tier in plant_tiers:
-            for vdef in tier:
-                if not self._is_veg_at(x, z, vdef):
-                    continue
-                is_cover = (self._has_tag(vdef, 'ground_cover')
-                            or vdef.get('name') == 'grass')
-                if is_cover:
-                    if self._eat_ground_cover_at(x, z, ci, i, cdef, vdef):
-                        return (x, z)
-                elif self._browse_plant_at(x, z, ci, i, cdef, vdef):
-                    return (x, z)
-            target = self._find_nearest_veg_among(x, z, tier, radius=radius)
-            if target:
-                step = self._step_toward(x, z, target[0], target[1], avoids)
-                return step if step else (x, z)
-        return self._move_creature_random(x, z, avoids)
+    def _work_plant_at(self, x, z, ci, i, cdef, tier, eats):
+        """Take what this creature can from whichever plant of this tier
+        stands on its tile. Eaten plants hand over a mouthful -- ground cover
+        cropped away whole, anything else bitten back -- while a raided one is
+        only knocked down, its loot left on the ground to be eaten later."""
+        vdef = self._veg_at(x, z, tier)
+        if not vdef:
+            return False
+        if not eats:
+            st = self.all_creature_stats[ci][i]
+            self._attack_plant_at(x, z, vdef, st['attack'])
+            print(f'[feed] {cdef["name"]}#{i} attacked {vdef["name"]} at ({x},{z})')
+            return True
+        if self._has_tag(vdef, 'ground_cover'):
+            return self._eat_ground_cover_at(x, z, ci, i, cdef, vdef)
+        return self._browse_plant_at(x, z, ci, i, cdef, vdef)
+
+    def _step_or_stay(self, x, z, target, avoids):
+        """Head for a target, holding position when nothing is walkable."""
+        step = self._step_toward(x, z, target[0], target[1], avoids)
+        return step if step else (x, z)
 
     def _act_feed(self, ci, i, cdef, x, z, avoids):
-        plant_tiers = self._resolve_plant_diet_tiers(cdef)
-        if plant_tiers:
-            return self._act_feed_plants(ci, i, cdef, x, z, avoids, plant_tiers)
+        """One feed order for every creature: eat drops -- underfoot, then the
+        nearest in reach -- and failing that work the standing plants, best
+        diet tier first, taking one underfoot before walking to the nearest.
 
-        st = self.all_creature_stats[ci][i]
+        Tier order beats distance, so a rabbit crosses the field for a carrot
+        instead of settling for the grass it is standing on. Only when a tier
+        has nothing at all in range does the next one get a look.
+
+        What separates a rat from a rabbit here is only their data -- which
+        drops each eats, and which plants each works."""
         radius = self._feed_radius(cdef)
 
         if self._eat_food_at_block(x, z, ci, i, cdef):
             return (x, z)
 
-        if self._is_flower_at(x, z):
-            self._attack_flower_at(x, z, st['attack'])
-            print(f'[feed] {cdef["name"]}#{i} attacked flower at ({x},{z})')
-            return (x, z)
+        target = self._find_nearest_food_drop(x, z, cdef, radius=radius)
+        if target:
+            return self._step_or_stay(x, z, target, avoids)
 
-        # Standing on a crop is the same opportunity as standing on a flower:
-        # knock it down here rather than walk off to a plant further away.
-        crop = self._crop_at(x, z)
-        if crop:
-            self._attack_plant_at(x, z, crop, st['attack'])
-            print(f'[feed] {cdef["name"]}#{i} attacked {crop["name"]} at ({x},{z})')
-            return (x, z)
-
-        food_target = self._find_nearest_food_drop(x, z, cdef, radius=radius)
-        if food_target:
-            step = self._step_toward(x, z, food_target[0], food_target[1], avoids)
-            return step if step else (x, z)
-
-        dead_target = self._find_nearest_flower(x, z, dead=True, radius=radius)
-        if dead_target:
-            step = self._step_toward(x, z, dead_target[0], dead_target[1], avoids)
-            return step if step else (x, z)
-
-        live_target = self._find_nearest_flower(x, z, dead=False, radius=radius)
-        if live_target:
-            step = self._step_toward(x, z, live_target[0], live_target[1], avoids)
-            return step if step else (x, z)
-
-        # No flowers in reach — raid the fields instead.
-        crop_target = self._find_nearest_veg_among(x, z, self.crop_vdefs, radius=radius)
-        if crop_target:
-            step = self._step_toward(x, z, crop_target[0], crop_target[1], avoids)
-            return step if step else (x, z)
+        for tier, eats in self._forage_tiers(cdef):
+            if self._work_plant_at(x, z, ci, i, cdef, tier, eats):
+                return (x, z)
+            target = self._find_nearest_forage(x, z, tier, radius=radius)
+            if target:
+                return self._step_or_stay(x, z, target, avoids)
 
         return self._move_creature_random(x, z, avoids)
 

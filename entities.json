@@ -200,6 +200,7 @@
       "stock_need": 0.9,
       "needs": ["feed", "sleep", "home", "stock"],
       "diet": ["food"],
+      "forage": ["flower", "crops"],
       "feed_radius": 5,
       "hunger_per_food": 1,
       "contains": [

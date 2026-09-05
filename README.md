@@ -107,8 +107,8 @@ What's covered:
 - Clock persistence: resuming season/cycle/day, falling back when a saved season is no longer in `config.json`, and seeding the day/night edge from the current phase
 - Item drops: spawn, stage-specific loot, expiry, and pickup (including diet/sleep gating, and leaving a stack alone when the creature is full or only ate part of it)
 - Flower attack/eat-in-place feeding
-- Herbivore plant diets (`_resolve_plant_diet`, `_act_feed_plants`): grazing ground cover, browsing bushes, and seeking the nearest plant within `feed_radius`
-- `feed_radius` resolution (`_feed_radius`) and its effect on both the carnivore and herbivore search paths
+- Plant diets (`_resolve_plant_diet_tiers`, `_forage_tiers`, `_work_plant_at`): grazing ground cover, browsing bushes, raiding flowers and crops, and seeking the nearest plant within `feed_radius`
+- `feed_radius` resolution (`_feed_radius`) and its effect on both the drop and plant search paths
 - Creature pathfinding primitives (`_step_toward`, `_find_nearest_*`, `_move_creature_random`)
 - Creature needs/sleep state machine (`_compute_creature_needs`, `_ranked_needs`, `_act_feed`, `_creature_move`), including a task declining its turn and handing over to the next need
 - Crop feeding both ways: rabbits preferring crops over grass at their feet and picking the nearest within a diet tier, rats attacking a crop underfoot and heading for one only when no flower is in reach
@@ -250,17 +250,19 @@ tag), and `contains` (the dwellers' larder, which the `stock` need fills with
 `{"item", "count"}` entries). Structures are *not* blocks: they live on a tile
 alongside whatever vegetation is there and are drawn over it.
 
-**Creatures** — `needs`, `diet`, hunger/age, movement, reproduction, death loot.
-`diet` entries are resolved against both items and vegetation, by name or by
-tag: matching **items** make a carnivore/scavenger that eats drops and attacks
-flowers (rat), while matching **vegetation** makes a herbivore that grazes and
-browses plants (rabbit). Diet order is preference order.
+**Creatures** — `needs`, `diet`, `forage`, hunger/age, movement, reproduction,
+death loot. `diet` is everything the creature eats, resolved against both items
+and vegetation, by name or by tag: matching **items** are drops it picks up
+(rat), matching **vegetation** are plants it eats where they stand (rabbit).
+`forage` lists plants it does *not* eat but knocks down anyway, for the loot
+they leave behind — the rat's `["flower", "crops"]`. Both lists are preference
+order, best first.
 
 `feed_radius` caps how far a creature will look for food, in Manhattan tiles,
-and applies to *all* search paths — drop/flower search for carnivores, plant
-search for herbivores, and the hunt for something to hoard. It defaults to
-`server.DEFAULT_FEED_RADIUS` (5) when a definition omits it, but both shipped
-creatures declare it explicitly (rat 5, rabbit 6).
+and applies to *all* search paths — drops, standing plants, and the hunt for
+something to hoard. It defaults to `server.DEFAULT_FEED_RADIUS` (5) when a
+definition omits it, but both shipped creatures declare it explicitly (rat 5,
+rabbit 6).
 
 `stock_need` is the fixed priority of the `stock` need (`0.9`, or
 `server.DEFAULT_STOCK_NEED`); `home_gain` (`0.5`) is how much wanting a home
@@ -377,40 +379,44 @@ Each simulation cycle (`cycle_length` seconds):
 3. New flora may spawn (fertility roll + per-type chance + proximity rules). Grass patches do not block flower/bush/tree — those may claim a grassy tile.
 4. Fauna creatures act on needs-driven tasks or move randomly (evaluated every `move_interval_day` seconds)
 
-### Creature feed AI (rats)
+### Creature feed AI
 
-When hungry (`feed` need = `initial_hunger - hunger`):
+One order, for every creature. When hungry (`feed` need = `initial_hunger - hunger`):
 
-1. Eat food drops on same tile (seed, berry, meat, carrot, cabbage — resolved via `food` tag)
-2. Attack flower on same tile (reduce age by `attack`)
-3. Attack crop on same tile (same deal — it's standing on food)
-4. Move toward nearest food drop within `feed_radius` (5 for rats)
-5. Move toward nearest dead flower, then live flower — same `feed_radius`
-6. Move toward nearest crop — flowers first, fields as the fallback
-7. Random move if nothing found
+1. Eat food drops on the same tile
+2. Move toward the nearest food drop within `feed_radius`
+3. Then, per diet tier, best first: work a plant of that tier on the same tile (see *eating vs raiding* below), else move toward the nearest one within `feed_radius`, else fall through to the next tier
+4. Random move if nothing found
 
-Attacking never feeds the rat directly; it knocks the plant down so it spills
-loot, and the rat eats that on a later tick (step 1). A crop at `initial_age`
-2 takes two hits from a rat with `attack` 1, then leaves 1–2 vegetables.
+Nothing above names a species, and `server.py` holds no list of what any
+creature eats. It all comes out of `entities.json`:
 
-### Creature feed AI (rabbits)
+| | rat | rabbit |
+|---|---|---|
+| `diet` | `["food"]` | `["crops", "grass", "bush"]` |
+| `forage` | `["flower", "crops"]` | — |
+| `feed_radius` | 5 | 6 |
+| eats off the ground | seed, berry, meat, carrot, cabbage (the `food` tag) | nothing — its diet names no items |
+| works standing plants | flower, then crops — raids them | crops, then grass, then bush — eats them |
 
-Herbivore diet (`diet: ["crops", "grass", "bush"]`, search radius `feed_radius`, 6 for rabbits):
+**Eating vs raiding.** A plant in the `diet` is food itself: ground cover
+(tagged `ground_cover`) is cropped away whole and the tile goes back to bare
+soil, anything else is bitten back by `attack`, and either way the mouthful is
++1 hunger (`hunger_per_food`). A plant in `forage` is not food — the creature
+just knocks it down, and eats whatever loot spills on a later tick via step 1.
+So the same carrot feeds a rabbit directly, while a rat has to level it first:
+two hits at `attack` 1, then 1–2 vegetables on the ground. Bitten-back plants
+still drop their loot when the bite kills them, so a rabbit that finishes a
+bush leaves its berries behind.
 
-1. If standing on a crop — browse it (crop age −`attack`, +1 hunger); it dies and drops its vegetable at age 0
-2. Else move toward the nearest crop within `feed_radius`
-3. Else if standing on grass cover — eat it (tile returns to bare soil), +1 hunger
-4. Else move toward nearest grass within `feed_radius`
-5. Else if standing on a bush — browse it (bush age −`attack`, +1 hunger); bush dies and drops loot at age 0
-6. Else move toward nearest bush within `feed_radius`
-7. Random move if nothing found
-
-Diet order is strict preference: a rabbit walks past grass at its feet to
-reach a crop four tiles away. Each diet entry forms one **tier**, and a tag
-entry like `crops` puts several plants in the same tier — within a tier the
-*nearest* plant wins, so a closer cabbage beats a further carrot even though
-carrot is declared first. The next tier is only considered when the current
-one has nothing in range at all.
+**Tiers.** Each diet entry forms one preference tier, and a tag entry like
+`crops` puts several plants in the same one — within a tier the *nearest* plant
+wins, so a closer cabbage beats a further carrot even though carrot is declared
+first. Tier order beats distance, and a later tier is only considered when the
+current one has nothing in range at all: a rabbit crosses four tiles for a
+carrot rather than settle for the grass it is standing on. Flowers are the one
+plant ranked by more than distance — a dried one is a seed head about to fall,
+so it outranks a live one however much further away it stands.
 
 ### Creature sleep AI (rats / rabbits)
 

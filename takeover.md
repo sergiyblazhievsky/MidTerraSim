@@ -1,11 +1,11 @@
 # MidTerraSim — Session Takeover
 
-Handoff document for continuing work in a new chat. Last updated 2026-09-03
+Handoff document for continuing work in a new chat. Last updated 2026-09-05
 (rabbits, per-season reproduction, grass as a soft under-layer, player
 fall-through fix — see [Gotchas](#gotchas) before touching player height —
 world-file persistence of fauna + the simulation clock, a data-driven
 `feed_radius`, burrows/the `home` need, the `stock` need that fills a
-burrow's larder, and carrot/cabbage crops).
+burrow's larder, carrot/cabbage crops, and one feed AI for every creature).
 
 ---
 
@@ -161,27 +161,37 @@ Needs compete purely by value, which sets the de-facto priority: `feed` grows
 digs; `stock`'s fixed 0.9 sits below any real hunger (≥ 1) and above a home
 want that has only built up for one day.
 
-**Feed priority (rat, the item path):**
-1. Eat food on same tile (`_resolve_diet` → items with matching tags/names)
-2. Attack flower on same tile
-3. Attack crop on same tile (`_crop_at`)
-4. Step toward nearest food drop within `feed_radius`
-5. Step toward nearest dead flower, then live flower — same radius
-6. Step toward nearest crop — flowers win, crops are the fallback
-7. Random move
+**Feed priority — one chain for every creature (`_act_feed`):**
+1. Eat food drops on same tile (`_eat_food_at_block`, diet → item names/tags)
+2. Step toward nearest food drop within `feed_radius`
+3. Per diet tier, best first: work a plant of that tier underfoot
+   (`_work_plant_at`), else step toward the nearest one in range
+   (`_find_nearest_forage`), else fall through to the next tier
+4. Random move
 
-Diet `"food"` resolves to seed, berry, meat, carrot, cabbage via item tags.
-Attacking (`_attack_plant_at`) never feeds the attacker; it fells the plant so
-its loot drops, and the rat eats that on a later tick via step 1. Crops are
-found through the `crops` **tag** (`self.crop_vdefs`), *not* the rat's diet —
-putting a plant in a rat's diet would route it to `_act_feed_plants` and kill
-the whole item path.
+`_forage_tiers(cdef)` returns `(tier, eats)` pairs and is the only place the
+two species diverge — out of `entities.json` alone, with no plant list left in
+`server.py`:
 
-**Feed priority (rabbit, the plant path):** diet entries are preference tiers,
-walked in order — `["crops", "grass", "bush"]`. For each tier: browse/graze a
-plant of that tier underfoot, else step toward the nearest one in range, else
-fall through to the next tier. A tag entry (`crops`) puts several plants in
-one tier, and within a tier the *nearest* wins rather than the first declared.
+* `diet` plants are eaten (`eats=True`): `ground_cover` is cropped away whole
+  (`_eat_ground_cover_at`), anything else is bitten back (`_browse_plant_at`),
+  both +`hunger_per_food`. The rabbit's `["crops", "grass", "bush"]`.
+* `forage` plants are only felled (`eats=False`) via `_attack_plant_at`: no
+  hunger changes hands, the plant just falls and spills loot the creature eats
+  later via step 1. The rat's `["flower", "crops"]`.
+
+Declaring both puts the eaten tiers first. A plant in both lists is resolved
+twice and the eaten tier always wins, so
+`test_no_plant_is_both_eaten_and_raided` keeps the lists disjoint.
+
+A tag entry (`crops`) puts several plants in one tier; within a tier the
+*nearest* wins rather than the first declared. Tier order beats distance and a
+later tier is only reached when the current one has nothing in range at all —
+that ordering is load-bearing, since grass is everywhere: check a plant
+underfoot before the tier searches and a rabbit grazes the first patch it steps
+on instead of ever reaching a crop. Flowers are the one plant ranked by more
+than distance (`_find_nearest_forage` → `_find_nearest_flower` dead-first: a
+dried flower is a seed head about to fall).
 
 **Home (`_act_home`):** claims the tile the creature is standing on — adopt
 the structure already there if `dwellers` allows it, else build one (never
@@ -247,8 +257,8 @@ See README for full table. Bush and tree loot is per-stage in `entities.json`.
 | Entity loading | `load_entities()`, `_veg_with_tag()`, `_items_with_tag()`, `_resolve_diet()` |
 | World drops | `_spawn_drop()`, `_drop_from()`, `_update_drops()` |
 | Simulation | `_sim_step()`, `_count_kind_near()`, `tick()` |
-| Creature AI | `_compute_creature_needs()`, `_ranked_needs()`, `_act_on_need()`, `_act_feed()`, `_act_feed_plants()`, `_resolve_plant_diet_tiers()`, `_feed_radius()`, `_act_home()`, `_creature_move()`, `_eat_food_at_block()` |
-| Plant damage | `_attack_plant_at()` (generic, no hunger), `_attack_flower_at()` and `_browse_plant_at()` (thin wrappers, the latter adding hunger), `_crop_at()`, `_find_nearest_veg_among()` |
+| Creature AI | `_compute_creature_needs()`, `_ranked_needs()`, `_act_on_need()`, `_act_feed()`, `_work_plant_at()`, `_forage_tiers()`, `_plant_tiers()`, `_feed_radius()`, `_act_home()`, `_creature_move()`, `_eat_food_at_block()` |
+| Plant damage | `_attack_plant_at()` (generic, no hunger), `_attack_flower_at()` and `_browse_plant_at()` (thin wrappers, the latter adding hunger), `_veg_at()`, `_crop_at()`, `_find_nearest_veg_among()`, `_find_nearest_forage()` |
 | Structures | `_resolve_home_structure()`, `_can_dwell()`, `_structure_at()`, `_structure_by_id()`, `_build_structure()`, `_remove_structure()`, `_break_structures()`, `_settle_home()` |
 | Stocking | `_stock_need()`, `_act_stock()`, `_pick_up_drop_at()`, `_act_deliver()`, `_stash_carried()`, `_drop_carried()` |
 | Lifecycle | `_on_day_start()`, `_on_season_start()`, `_spawn_creature_at()`, `_remove_creature()` |
@@ -357,6 +367,8 @@ frame times spike from actual mesh building.
 32. Added `tests/test_entities_file.py` — the first tests to validate the *real* `entities.json` (textures exist, loot references resolve, block ids unique and in sync with `chunk.py`, stage order, unambiguous diets)
 33. Both creatures now work the standing crop, not just its drops: rabbits took `crops` as the **first** diet entry, rats attack a crop underfoot and walk to one when no flower is in range. Plant damage was pulled out into `_attack_plant_at()`, shared by the flower attack (no hunger) and browsing (hunger)
 34. `_resolve_plant_diet` became `_resolve_plant_diet_tiers`: a diet entry is now a preference *tier* holding every plant it names, so the tag `crops` groups carrot and cabbage and the nearest of the two wins instead of declaration order
+35. Collapsed the two feed AIs into one. `_act_feed_plants` and the rat's hand-rolled chain are gone; every creature now runs the same chain (drops, then a tier loop of underfoot-else-nearest) over the `(tier, eats)` pairs `_forage_tiers()` builds. That retired the all-or-nothing diet switch: a plant in a rat's diet is now merely a plant it would eat. Only the raiding path shifted behavior: the drop search and the flower search now both outrank a plant underfoot, so a rat on a crop walks to a flower in range instead of hitting the crop. All 339 tests passed unchanged
+36. Moved the last of the feeding policy into `entities.json`. The rat declares `"forage": ["flower", "crops"]` — what it fells for loot without eating — replacing the `self.raid_tiers` list that `__init__` used to build from `flower_vdef` + the `crops` tag. `_eat_ground_cover_at` dispatch also lost its `name == 'grass'` fallback and now keys purely off the `ground_cover` tag. Five new `entities.json` guards (unresolvable entries, plants in both lists, raided plants actually dropping food)
 
 ## Session Work Log (2026-09-02)
 
@@ -377,8 +389,8 @@ frame times spike from actual mesh building.
   a stocked burrow doesn't yet help anyone through a lean winter
 - Sleeping/breeding inside a burrow rather than wherever the creature stands
 - Extend `needs` beyond `feed`/`sleep`/`home` (thirst, etc.)
-- Predators (fox/wolf) — needs a new "hunt" behavior; the plant-diet path
-  (`_act_feed_plants`) is the closest existing template
+- Predators (fox/wolf) — needs a new "hunt" behavior; `_act_feed`'s
+  underfoot-then-nearest chain is the closest existing template
 - Align `generate_chunk.py` initial spawn order with runtime (flower first vs last)
 - `map_viewer.py` — show bushes/trees/grass, not just flowers
 - Flora variety / new fauna / generated heightmap — see roadmap
@@ -388,20 +400,24 @@ frame times spike from actual mesh building.
 
 ## Quick Reference: Creature Configs
 
-`diet` drives *which* feed AI runs: item names/tags → drops + flower/crop
-attacks (`_act_feed`); vegetation names/tags → grazing/browsing
-(`_act_feed_plants`). The switch is all-or-nothing — one plant-matching diet
-entry sends the creature down the herbivore path and its item behavior never
-runs, which is why the rat's diet must stay items-only and why
-`test_no_diet_entry_matches_both_a_plant_and_an_item` exists.
-`feed_radius` caps the search distance on both paths via `_feed_radius(cdef)`
-(fallback `DEFAULT_FEED_RADIUS = 5`).
+`diet` mixes freely: item names/tags become the drops a creature eats
+(`_resolve_diet`), vegetation names/tags become the plants it eats standing
+(`_resolve_plant_diet_tiers`), and both feed the one chain in `_act_feed`. An
+entry matching a plant *and* an item would be counted twice, once per side,
+which is why `test_no_diet_entry_matches_both_a_plant_and_an_item` exists.
+`forage` is the second, optional plant list: plants the creature fells for
+their loot without eating them (`_plant_tiers` again, but tagged `eats=False`).
+Both are preference order, and entries matching nothing are dropped in silence
+— `test_every_diet_and_forage_entry_names_something` guards the typo.
+`feed_radius` caps the search distance for drops and plants alike via
+`_feed_radius(cdef)` (fallback `DEFAULT_FEED_RADIUS = 5`).
 
 ```json
 {
   "name": "rat",
   "needs": ["feed", "sleep", "home", "stock"],
   "diet": ["food"],
+  "forage": ["flower", "crops"],
   "feed_radius": 5,
   "initial_hunger": 3,
   "attack": 1,

@@ -39,6 +39,16 @@ def _loot_pools(edef):
         yield stage.get("contains", [])
 
 
+def _matches_item(entry):
+    return entry in ITEM_NAMES or any(entry in i.get("tags", [])
+                                      for i in ENTITIES["items"])
+
+
+def _plants_matching(entry):
+    return [v for v in ENTITIES["vegetation"]
+            if entry == v["name"] or entry in v.get("tags", [])]
+
+
 @pytest.mark.parametrize("section,edef", list(_all_defs()),
                          ids=lambda v: v["name"] if isinstance(v, dict) else v)
 def test_every_referenced_texture_exists(section, edef):
@@ -84,17 +94,47 @@ def test_stages_are_ordered_by_ascending_max_age(vdef):
 
 @pytest.mark.parametrize("cdef", ENTITIES["creatures"], ids=lambda c: c["name"])
 def test_no_diet_entry_matches_both_a_plant_and_an_item(cdef):
-    # _act_feed hands the whole turn to the herbivore path as soon as *any*
-    # diet entry resolves to vegetation, so an entry matching both a plant and
-    # an item would silently kill the drop-eating path. Tagging a crop "food",
-    # for instance, would turn every rat into a browser.
+    # _act_feed resolves the diet twice, once for drops and once for standing
+    # plants, so an entry matching both would put the same word to work on two
+    # jobs at once -- tagging a crop "food" would have every rat browsing the
+    # fields as well as eating the vegetables off them.
     for entry in cdef["diet"]:
-        matches_item = entry in ITEM_NAMES or any(
-            entry in i.get("tags", []) for i in ENTITIES["items"])
-        matches_plant = any(entry == v["name"] or entry in v.get("tags", [])
-                            for v in ENTITIES["vegetation"])
-        assert not (matches_item and matches_plant), \
+        assert not (_matches_item(entry) and _plants_matching(entry)), \
             f"{cdef['name']}: diet entry {entry!r} is ambiguous"
+
+
+@pytest.mark.parametrize("cdef", ENTITIES["creatures"], ids=lambda c: c["name"])
+def test_every_diet_and_forage_entry_names_something(cdef):
+    # Entries matching nothing are dropped in silence, so a typo costs the
+    # creature a whole food source with no error to show for it.
+    for key in ("diet", "forage"):
+        for entry in cdef.get(key, []):
+            assert _matches_item(entry) or _plants_matching(entry), \
+                f"{cdef['name']}: {key} entry {entry!r} names nothing"
+
+
+@pytest.mark.parametrize("cdef", ENTITIES["creatures"], ids=lambda c: c["name"])
+def test_no_plant_is_both_eaten_and_raided(cdef):
+    # Eating wins when a plant sits in both lists, leaving the forage tier to
+    # scan for something the diet tier already claimed.
+    eaten = {v["block_id"] for e in cdef["diet"] for v in _plants_matching(e)}
+    raided = {v["block_id"] for e in cdef.get("forage", [])
+              for v in _plants_matching(e)}
+
+    assert not eaten & raided, f"{cdef['name']}: same plant eaten and raided"
+
+
+def test_the_plants_a_rat_raids_all_drop_food_it_eats():
+    # Raiding only pays off in loot: the hit itself feeds nobody, so a plant
+    # worth felling has to leave something on the rat's menu behind.
+    rat = next(c for c in ENTITIES["creatures"] if c["name"] == "rat")
+    food = {i["name"] for i in ENTITIES["items"] if "food" in i["tags"]}
+    raided = [v for e in rat["forage"] for v in _plants_matching(e)]
+
+    assert [v["name"] for v in raided] == ["flower", "carrot", "cabbage"]
+    for vdef in raided:
+        dropped = {entry["item"] for pool in _loot_pools(vdef) for entry in pool}
+        assert dropped & food, f"{vdef['name']} drops nothing a rat eats"
 
 
 # ── crops ────────────────────────────────────────────────────────────────────

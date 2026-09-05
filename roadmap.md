@@ -53,8 +53,8 @@ established by rats.
   same needs/sleep/movement pattern as rats (`entities.json` + plant diet
   feed AI).
 - [ ] **Foxes** -- predator; would need a new "hunt" need/behavior
-  (attacking rabbits/rats rather than flowers), since the current feed AI
-  only attacks flowers. First carnivore in the ecosystem.
+  (attacking rabbits/rats rather than plants), since the current feed AI only
+  works standing plants and item drops. First carnivore in the ecosystem.
 - [ ] **Wolves** -- predator, larger/pack-oriented; may want a "pack" or
   "group" mechanic distinct from foxes, or could reuse the same predator
   behavior at a different scale/threat level.
@@ -113,9 +113,10 @@ Currently flower/bush/tree are each a single generic type. Extend
   (`initial_age: 2`, decay every 4th cycle) and drops a matching `raw`/`food`
   item. Rats eat and hoard them, since their diet is the `food` tag.
 - [x] **Both creatures work the standing plant** -- rabbits take `crops` as
-  their first diet tier (a crop in range beats grass underfoot, nearest crop
+  their first diet tier (a crop in range beats grass further off, nearest crop
   wins), and rats attack a crop they're standing on or walk to one when no
-  flower is in range.
+  flower is in range. Both now run the *same* `_act_feed` chain; only their
+  `diet`/`forage` lists differ (see README's "Creature feed AI").
 - [ ] **Wheat** -- the third crop from the original idea, still unbuilt.
 - [ ] **Grow stages for crops** -- both crops are a single stage today, so a
   seedling looks exactly like a ripe plant. Age already counts 2 (young) then

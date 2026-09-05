@@ -210,6 +210,7 @@ TEST_ENTITIES = {
             "home_gain": 0.5,
             "stock_need": 0.9,
             "diet": ["food"],
+            "forage": ["flower", "crops"],
             "feed_radius": 5,
             "hunger_per_food": 1,
             "contains": [{"item": "meat", "count": [1, 1]}],
